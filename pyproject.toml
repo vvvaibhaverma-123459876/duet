@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duet"
+version = "0.1.0"
+description = "Make Claude and Codex collaborate in your terminal, with the orchestrator deciding when they're actually done."
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+duet = "duet.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["duet*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "e2e: runs real Claude Code and Codex CLIs"
+]

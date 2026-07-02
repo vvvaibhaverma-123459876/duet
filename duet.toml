@@ -1,0 +1,26 @@
+[session]
+start_with = "claude"
+max_turns = 6
+wallclock_seconds = 900
+loop_threshold = 0.9
+
+[agents.claude]
+display_name = "Claude"
+command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions"]
+prompt_via = "stdin"
+workspace_flag = "--add-dir"
+output_format = "json"
+result_json_path = "result"
+session_json_path = "session_id"
+model = ""
+timeout_seconds = 300
+
+[agents.codex]
+display_name = "Codex"
+command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--skip-git-repo-check"]
+prompt_via = "stdin-sentinel"
+stdin_sentinel = "-"
+workspace_flag = "-C"
+output_format = "text-last-line"
+model = ""
+timeout_seconds = 300
