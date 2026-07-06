@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Protocol
 
 SESSION_ID_PLACEHOLDER = "{session_id}"
+WORKSPACE_PLACEHOLDER = "{workspace}"
 
 
 class AgentError(RuntimeError):
@@ -52,13 +53,18 @@ class CLIAgent:
     chain_sessions: bool = False
 
     def build_command(self, prompt: str, workspace: Path) -> tuple[list[str], str | None]:
-        if self.session_id and self.resume_command:
-            cmd = [part.replace(SESSION_ID_PLACEHOLDER, self.session_id) for part in self.resume_command]
-        else:
-            cmd = list(self.command)
+        template = self.resume_command if self.session_id and self.resume_command else self.command
+        # Some CLIs only accept the workspace flag before a subcommand
+        # (codex exec resume), so templates may place it via {workspace}
+        # instead of relying on the appended workspace_flag.
+        inline_workspace = any(WORKSPACE_PLACEHOLDER in part for part in template)
+        cmd = [
+            part.replace(SESSION_ID_PLACEHOLDER, self.session_id).replace(WORKSPACE_PLACEHOLDER, str(workspace))
+            for part in template
+        ]
         if self.model:
             cmd.extend(["-m", self.model])
-        if self.workspace_flag:
+        if self.workspace_flag and not inline_workspace:
             cmd.extend([self.workspace_flag, str(workspace)])
 
         stdin_data: str | None = None

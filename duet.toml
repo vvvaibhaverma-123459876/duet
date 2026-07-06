@@ -19,7 +19,7 @@ timeout_seconds = 300
 [agents.codex]
 display_name = "Codex"
 command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--skip-git-repo-check"]
-resume_command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "resume", "--skip-git-repo-check", "{session_id}"]
+resume_command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "-C", "{workspace}", "--skip-git-repo-check", "resume", "{session_id}"]
 prompt_via = "stdin-sentinel"
 stdin_sentinel = "-"
 workspace_flag = "-C"

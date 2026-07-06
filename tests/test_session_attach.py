@@ -201,3 +201,20 @@ class TestPeek:
         info = list_codex_sessions(codex_home=tmp_path)[0]
         rendered = format_peek(info, "codex", peek_session(path, "codex"))
         assert "read-only peek" in rendered and "cwd=/work/repo" in rendered
+
+
+class TestWorkspacePlaceholder:
+    def test_inline_workspace_suppresses_appended_flag(self, tmp_path):
+        agent = make_agent(
+            session_id="abc",
+            workspace_flag="-C",
+            resume_command=["codex", "exec", "-C", "{workspace}", "resume", "{session_id}"],
+        )
+        cmd, _ = agent.build_command("hi", tmp_path)
+        assert cmd[: 6] == ["codex", "exec", "-C", str(tmp_path), "resume", "abc"]
+        assert cmd.count("-C") == 1
+
+    def test_no_placeholder_still_appends_flag(self, tmp_path):
+        agent = make_agent(workspace_flag="--add-dir")
+        cmd, _ = agent.build_command("hi", tmp_path)
+        assert cmd[cmd.index("--add-dir") + 1] == str(tmp_path)
