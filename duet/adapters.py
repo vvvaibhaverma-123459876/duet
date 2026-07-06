@@ -5,9 +5,11 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
+
+SESSION_ID_PLACEHOLDER = "{session_id}"
 
 
 class AgentError(RuntimeError):
@@ -45,9 +47,15 @@ class CLIAgent:
     session_json_path: str = ""
     model: str = ""
     stdin_sentinel: str = "-"
+    resume_command: list[str] = field(default_factory=list)
+    session_id: str = ""
+    chain_sessions: bool = False
 
-    def send(self, prompt: str, workspace: Path) -> AgentResult:
-        cmd = list(self.command)
+    def build_command(self, prompt: str, workspace: Path) -> tuple[list[str], str | None]:
+        if self.session_id and self.resume_command:
+            cmd = [part.replace(SESSION_ID_PLACEHOLDER, self.session_id) for part in self.resume_command]
+        else:
+            cmd = list(self.command)
         if self.model:
             cmd.extend(["-m", self.model])
         if self.workspace_flag:
@@ -63,7 +71,10 @@ class CLIAgent:
             cmd.append(prompt)
         else:
             raise AgentError(f"{self.name}: unsupported prompt_via={self.prompt_via!r}")
+        return cmd, stdin_data
 
+    def send(self, prompt: str, workspace: Path) -> AgentResult:
+        cmd, stdin_data = self.build_command(prompt, workspace)
         started = time.monotonic()
         try:
             proc = subprocess.Popen(
@@ -101,6 +112,10 @@ class CLIAgent:
             raise AgentError(f"{self.name}: produced empty output. Command: {_redacted_cmd(cmd)}. stderr: {_tail(stderr)}")
         if warning:
             text = f"{text.strip()}\n\n[Duet warning: {warning}]"
+        if self.chain_sessions and session_id:
+            # Resumed sessions get a fresh id on each turn; adopt it so the
+            # next send() continues the same conversation, not a stale fork.
+            self.session_id = session_id
         return AgentResult(
             text=text.strip(),
             exit_code=proc.returncode,

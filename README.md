@@ -58,6 +58,7 @@ duet                         # REPL when stdin is a TTY
 duet run "Fix the bug"       # headless one-shot in a scratch workspace
 duet exec "Fix the bug"      # alias for run
 duet doctor                  # preflight
+duet sessions --repo PATH    # list Claude Code sessions available to attach
 duet replay transcript.json  # render markdown
 duet init --project          # write ./duet.toml
 duet init --user             # write ~/.config/duet/config.toml
@@ -95,6 +96,37 @@ Because the bundled agent commands run non-interactively
 Codex), the branch isolation and rollback are the guardrails on a live repo. If
 you want an interactive approval gate instead, edit the agent `command` in your
 `duet.toml`; branch isolation still applies.
+
+## Attaching to an existing agent session
+
+Duet can resume an agent CLI session that already exists — for example a Claude
+Code session another operator (or you) previously ran against the same repo —
+so the Duet performer starts with that session's full context instead of cold.
+
+```bash
+duet sessions --repo /path/to/project          # find the session id
+duet run --repo /path/to/project \
+  --attach claude=<session-id> \
+  "Continue the audit you were running; close out the remaining findings"
+```
+
+- `--attach AGENT=SESSION_ID` (repeatable) resumes that agent via its
+  `resume_command` from `duet.toml` (`claude -p --resume`, `codex exec resume`).
+- Attaching implies **session chaining**: each turn returns a fresh session id
+  and Duet feeds it into the next turn's resume, so the conversation stays one
+  continuous thread across the whole Duet run.
+- `--chain-sessions` enables the same chaining for cold-started agents, giving
+  performers real cross-turn memory instead of relying only on the re-fed
+  transcript.
+- The final summary prints each agent's last session id so a later
+  `duet run --attach` can pick up exactly where the run stopped.
+
+Honest limits: resuming *forks* the stored conversation state. If the original
+session is still open in another terminal, that terminal will not see Duet's
+messages — this is "continue that agent's memory", not "type into its window".
+Attach to sessions that are idle or finished. Run with `--repo` pointing at the
+same directory the session was recorded in, since Claude Code stores sessions
+per project directory.
 
 ## Production hardening
 

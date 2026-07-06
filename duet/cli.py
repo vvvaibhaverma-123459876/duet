@@ -12,6 +12,7 @@ from .config import ConfigError, load_config, write_config
 from .doctor import available_agent_names, format_checks, hard_failures, run_doctor
 from .logging_setup import configure_logging, get_logger
 from .repl import Repl
+from .sessions import format_sessions, list_claude_sessions
 from .transcript import Transcript
 from .verifiers import AlwaysUnknown, PytestVerifier
 from .workspace import (
@@ -63,6 +64,21 @@ def main(argv: list[str] | None = None) -> int:
         run.add_argument("--seed-demo", action="store_true")
         run.add_argument("--interactive-handoff", action="store_true")
         run.add_argument("--output-format", choices=["text", "json"], default="text")
+        run.add_argument(
+            "--attach",
+            action="append",
+            metavar="AGENT=SESSION_ID",
+            help="resume an existing agent session (e.g. claude=<uuid> from `duet sessions`); repeatable",
+        )
+        run.add_argument(
+            "--chain-sessions",
+            action="store_true",
+            help="carry each agent's CLI session forward between turns instead of stateless spawns",
+        )
+
+    sessions = sub.add_parser("sessions", help="list Claude Code sessions available to attach for a repo")
+    sessions.add_argument("--repo", default=".", help="repo the sessions belong to (default: current directory)")
+    sessions.add_argument("--limit", type=int, default=10)
 
     replay = sub.add_parser("replay")
     replay.add_argument("transcript_json")
@@ -91,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         checks = run_doctor(config)
         print(format_checks(checks))
         return 1 if hard_failures(checks) else 0
+
+    if args.command == "sessions":
+        repo = Path(args.repo)
+        print(format_sessions(repo, list_claude_sessions(repo, limit=args.limit)))
+        return 0
 
     if args.command == "replay":
         print(Transcript.load_json(Path(args.transcript_json)).render_markdown(), end="")
@@ -123,6 +144,18 @@ def _run_headless(args, config) -> int:
 
     available = available_agent_names(checks)
     agents = {name: agent for name, agent in config.agents.items() if name in available}
+
+    try:
+        _apply_attach(agents, getattr(args, "attach", None) or [])
+    except ValueError as exc:
+        if args.output_format == "json":
+            print(json.dumps({"outcome": "halted", "error": str(exc)}, indent=2))
+        else:
+            print(f"Cannot attach: {exc}", file=sys.stderr)
+        return 1
+    if getattr(args, "chain_sessions", False):
+        for agent in agents.values():
+            agent.chain_sessions = True
 
     live: LiveRepo | None = None
     try:
@@ -177,6 +210,9 @@ def _run_headless(args, config) -> int:
                 print(f"Branch: {live.branch} (review with `git -C {live.workspace} log {live.branch}` and merge deliberately)")
             print(f"Transcript JSON: {result.transcript_path}")
             print(f"Markdown log: {result.markdown_path}")
+            for name, agent in agents.items():
+                if getattr(agent, "session_id", ""):
+                    print(f"Session ({name}): {agent.session_id} (re-attach with --attach {name}={agent.session_id})")
             if result.session.transcript.error:
                 print(f"Error: {result.session.transcript.error}")
             print("\nGit log:")
@@ -199,6 +235,21 @@ def _run_headless(args, config) -> int:
             else:
                 print(f"Duet branch left at {live.branch} for inspection.", file=sys.stderr)
         release_lock(workspace)
+
+
+def _apply_attach(agents: dict, specs: list[str]) -> None:
+    for spec in specs:
+        name, separator, session_id = spec.partition("=")
+        name, session_id = name.strip(), session_id.strip()
+        if not separator or not name or not session_id:
+            raise ValueError(f"--attach expects AGENT=SESSION_ID, got {spec!r}")
+        if name not in agents:
+            raise ValueError(f"unknown or unavailable agent {name!r} (available: {', '.join(agents) or 'none'})")
+        agent = agents[name]
+        if not getattr(agent, "resume_command", None):
+            raise ValueError(f"agent {name!r} has no resume_command configured in duet.toml")
+        agent.session_id = session_id
+        agent.chain_sessions = True
 
 
 def _install_signal_handlers() -> None:

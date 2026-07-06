@@ -12,12 +12,14 @@ workspace_flag = "--add-dir"
 output_format = "json"
 result_json_path = "result"
 session_json_path = "session_id"
+resume_command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions", "--resume", "{session_id}"]
 model = ""
 timeout_seconds = 300
 
 [agents.codex]
 display_name = "Codex"
 command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--skip-git-repo-check"]
+resume_command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "resume", "--skip-git-repo-check", "{session_id}"]
 prompt_via = "stdin-sentinel"
 stdin_sentinel = "-"
 workspace_flag = "-C"

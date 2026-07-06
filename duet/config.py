@@ -7,7 +7,7 @@ import os
 import shutil
 import tomllib
 
-from .adapters import CLIAgent
+from .adapters import SESSION_ID_PLACEHOLDER, CLIAgent
 
 VALID_PROMPT_VIA = {"stdin", "stdin-sentinel", "arg"}
 VALID_OUTPUT_FORMAT = {"text", "text-last-line", "json"}
@@ -82,6 +82,12 @@ def _build_agent(name: str, item: dict, config_path: Path) -> CLIAgent:
         raise ConfigError(f"agent '{name}': timeout_seconds must be an integer: {exc}") from exc
     if timeout_seconds <= 0:
         raise ConfigError(f"agent '{name}': timeout_seconds must be positive")
+    resume_command = item.get("resume_command", [])
+    if resume_command:
+        if not isinstance(resume_command, list) or not all(isinstance(part, str) for part in resume_command):
+            raise ConfigError(f"agent '{name}': resume_command must be a string list")
+        if not any(SESSION_ID_PLACEHOLDER in part for part in resume_command):
+            raise ConfigError(f"agent '{name}': resume_command must contain the {SESSION_ID_PLACEHOLDER!r} placeholder")
     return CLIAgent(
         name=name,
         display_name=item.get("display_name", name.title()),
@@ -94,6 +100,8 @@ def _build_agent(name: str, item: dict, config_path: Path) -> CLIAgent:
         model=item.get("model", ""),
         timeout_seconds=timeout_seconds,
         stdin_sentinel=item.get("stdin_sentinel", "-"),
+        resume_command=list(resume_command),
+        chain_sessions=bool(item.get("chain_sessions", False)),
     )
 
 
