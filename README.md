@@ -58,6 +58,8 @@ duet                         # REPL when stdin is a TTY
 duet run "Fix the bug"       # headless one-shot in a scratch workspace
 duet exec "Fix the bug"      # alias for run
 duet doctor                  # preflight
+duet status --repo PATH      # detect agent sessions/processes for a repo (live vs idle)
+duet connect --repo PATH "…" # resume existing claude+codex sessions as one duet
 duet sessions --repo PATH    # list Claude Code sessions available to attach
 duet sessions codex          # list Codex sessions (most recent first, with cwd)
 duet peek codex              # read-only tail of the most recent Codex session
@@ -140,6 +142,34 @@ duet sessions codex                 # find the live session and its cwd
 duet peek codex                     # tail the most recent one
 duet peek codex <session-id> --lines 50
 ```
+
+## Connecting independent sessions into a duet
+
+When Claude Code and Codex have each been working on the same repo in separate,
+unrelated sessions, `duet connect` turns them into one brokered duet without
+losing either agent's context:
+
+```bash
+duet status --repo /path/to/project    # who's there? live or idle?
+duet connect --repo /path/to/project "Reconcile your work and finish the task"
+```
+
+`connect` detects each agent's newest session for the repo (Claude sessions are
+matched by project directory; Codex sessions by recorded cwd, including
+ancestors) and resumes both into the broker loop. Detection is automatic but
+overridable with `--claude SESSION_ID` / `--codex SESSION_ID`. An agent with no
+session for the repo is cold-started — so `connect` also covers the "launch the
+missing partner" case.
+
+Safety: a session whose transcript was written in the last three minutes is
+classified **LIVE**, and `connect` refuses to resume it — resuming would fork
+the conversation out from under the running agent. Peek at it instead, wait for
+it to go idle, or pass `--fork-live` to accept the fork deliberately.
+
+Multiple duets can run in parallel: each `duet run`/`connect` takes a workspace
+lock and its own `duet/session-*` branch, so concurrent sessions on different
+repos (or worktrees of one repo) do not interfere. Duet does not open terminal
+windows for you; run each session in its own terminal or under `tmux`.
 
 ## Production hardening
 

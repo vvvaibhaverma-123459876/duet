@@ -11,6 +11,7 @@ from .broker import run_session
 from .config import ConfigError, load_config, write_config
 from .doctor import available_agent_names, format_checks, hard_failures, run_doctor
 from .logging_setup import configure_logging, get_logger
+from .detect import detect_activity, format_activity
 from .repl import Repl
 from .sessions import (
     format_codex_sessions,
@@ -88,6 +89,26 @@ def main(argv: list[str] | None = None) -> int:
     sessions.add_argument("--repo", default=".", help="repo the sessions belong to (claude only; default: current directory)")
     sessions.add_argument("--limit", type=int, default=10)
 
+    status = sub.add_parser("status", help="detect agent sessions and processes relevant to a repo")
+    status.add_argument("--repo", default=".", help="repo to inspect (default: current directory)")
+
+    connect = sub.add_parser(
+        "connect",
+        help="resume existing independent claude/codex sessions as one duet; cold-starts agents with no session",
+    )
+    connect.add_argument("task", nargs="?")
+    connect.add_argument("--repo", default=".", help="repo the sessions belong to and to work on (live mode)")
+    connect.add_argument("--claude", metavar="SESSION_ID", help="claude session to resume (default: newest idle for repo)")
+    connect.add_argument("--codex", metavar="SESSION_ID", help="codex session to resume (default: newest idle for repo)")
+    connect.add_argument("--fork-live", action="store_true", help="allow resuming a session that looks live (forks its state)")
+    connect.add_argument("--branch")
+    connect.add_argument("--allow-dirty", action="store_true")
+    connect.add_argument("--rollback-on-failure", action="store_true")
+    connect.add_argument("--start", choices=["claude", "codex"])
+    connect.add_argument("--max-turns", type=int)
+    connect.add_argument("--verify", choices=["pytest", "none"], default="none")
+    connect.add_argument("--output-format", choices=["text", "json"], default="text")
+
     peek = sub.add_parser("peek", help="read-only tail of an agent session, safe while it is still running")
     peek.add_argument("agent", choices=["claude", "codex"])
     peek.add_argument("session_id", nargs="?", help="session to peek (default: most recently active)")
@@ -129,6 +150,13 @@ def main(argv: list[str] | None = None) -> int:
             repo = Path(args.repo)
             print(format_sessions(repo, list_claude_sessions(repo, limit=args.limit)))
         return 0
+
+    if args.command == "status":
+        print(format_activity(detect_activity(Path(args.repo))))
+        return 0
+
+    if args.command == "connect":
+        return _connect(args, config)
 
     if args.command == "peek":
         return _peek(args)
@@ -255,6 +283,64 @@ def _run_headless(args, config) -> int:
             else:
                 print(f"Duet branch left at {live.branch} for inspection.", file=sys.stderr)
         release_lock(workspace)
+
+
+def _connect(args, config) -> int:
+    """Resolve which existing sessions to resume, then delegate to the normal
+    headless run with --attach specs synthesized from detection."""
+    repo = Path(args.repo)
+    activity = detect_activity(repo)
+    attach: list[str] = []
+    notes: list[str] = []
+    for agent, explicit in (("claude", args.claude), ("codex", args.codex)):
+        session_id, live = _resolve_connect_session(activity, agent, explicit)
+        if session_id is None:
+            notes.append(f"{agent}: no session found for this repo — cold start")
+            continue
+        if live and not args.fork_live:
+            print(
+                f"{agent} session {session_id} looks LIVE (transcript written in the last 3 minutes).\n"
+                f"Resuming would fork its conversation state while it is mid-task.\n"
+                f"Observe it instead with `duet peek {agent} {session_id}`, or pass --fork-live to connect anyway.",
+                file=sys.stderr,
+            )
+            return 1
+        state = "live, forked deliberately" if live else "idle"
+        notes.append(f"{agent}: resuming session {session_id} ({state})")
+        attach.append(f"{agent}={session_id}")
+    if args.output_format == "text":
+        for note in notes:
+            print(f"Connect: {note}")
+    run_args = argparse.Namespace(
+        task=args.task,
+        workspace=None,
+        repo=args.repo,
+        branch=args.branch,
+        allow_dirty=args.allow_dirty,
+        rollback_on_failure=args.rollback_on_failure,
+        start=args.start,
+        max_turns=args.max_turns,
+        verify=args.verify,
+        seed_demo=False,
+        interactive_handoff=False,
+        output_format=args.output_format,
+        attach=attach,
+        chain_sessions=True,
+    )
+    return _run_headless(run_args, config)
+
+
+def _resolve_connect_session(activity, agent: str, explicit: str | None) -> tuple[str | None, bool]:
+    if explicit:
+        for detected in activity.candidates(agent):
+            if detected.info.session_id == explicit:
+                return explicit, detected.live
+        # Trust an explicit id even if detection did not surface it.
+        return explicit, False
+    best = activity.best(agent)
+    if best is None:
+        return None, False
+    return best.info.session_id, best.live
 
 
 def _peek(args) -> int:
