@@ -84,6 +84,11 @@ class CLIAgent:
                     f"{self.name}: timed out after {self.timeout_seconds}s; killed child process tree. "
                     f"Command: {_redacted_cmd(cmd)}. If this was Codex approval blocking, set non-interactive approval/sandbox flags in duet.toml."
                 ) from exc
+            except BaseException:
+                # Interrupt (SIGINT/SIGTERM) or any abnormal exit: never leave the
+                # agent CLI running in its own process group. Kill, then re-raise.
+                _kill_process_tree(proc)
+                raise
         except FileNotFoundError as exc:
             raise AgentError(f"{self.name}: executable not found: {cmd[0]}. Command: {_redacted_cmd(cmd)}") from exc
         duration = time.monotonic() - started

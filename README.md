@@ -55,7 +55,7 @@ flowchart LR
 
 ```bash
 duet                         # REPL when stdin is a TTY
-duet run "Fix the bug"       # headless one-shot
+duet run "Fix the bug"       # headless one-shot in a scratch workspace
 duet exec "Fix the bug"      # alias for run
 duet doctor                  # preflight
 duet replay transcript.json  # render markdown
@@ -63,6 +63,49 @@ duet init --project          # write ./duet.toml
 duet init --user             # write ~/.config/duet/config.toml
 duet --version
 ```
+
+Global flags: `--log-level DEBUG|INFO|WARNING|ERROR` (or `DUET_LOG`) and
+`--log-file PATH` (or `DUET_LOG_FILE`) enable structured logging.
+
+## Working on an existing repo (live mode)
+
+By default `duet run` operates in a disposable scratch workspace. To let the
+agents work on a real repository, point `--repo` at it:
+
+```bash
+duet run --repo /path/to/project "Add retry logic to the HTTP client" --verify pytest
+```
+
+Live mode is safe by default:
+
+- The target must be a git work tree, and by default its tree must be **clean**
+  so unrelated uncommitted work is never swept into Duet's commits. Pass
+  `--allow-dirty` to override.
+- Duet checks out a fresh `duet/session-<timestamp>` branch and records the base
+  commit. **All agent commits land on that branch only** — your original branch
+  is never modified.
+- Duet never merges. When the session ends you review the branch
+  (`git log`, `git diff`) and merge deliberately.
+- `--rollback-on-failure` discards the Duet branch if the session does not
+  succeed (or is interrupted); otherwise the branch is left for inspection.
+- `--branch NAME` overrides the generated branch name.
+
+Because the bundled agent commands run non-interactively
+(`--dangerously-skip-permissions` for Claude, `--ask-for-approval never` for
+Codex), the branch isolation and rollback are the guardrails on a live repo. If
+you want an interactive approval gate instead, edit the agent `command` in your
+`duet.toml`; branch isolation still applies.
+
+## Production hardening
+
+- Subprocess timeouts with process-tree kill for agents, and a bounded timeout
+  for the pytest verifier so a hanging test cannot wedge the session.
+- Git failures are surfaced as clean halts, not crashes; agent/verifier output
+  stored in transcripts is size-bounded to protect memory.
+- The workspace lock records its PID and is reclaimed automatically if the
+  owning process has died; SIGINT/SIGTERM trigger a graceful shutdown that
+  releases the lock and honors rollback intent.
+- Malformed config files fail fast with a clear `ConfigError`.
 
 Config precedence is deterministic: `--config PATH`, then `./duet.toml`, then `$XDG_CONFIG_HOME/duet/config.toml` or `~/.config/duet/config.toml`, then the built-in detected defaults.
 

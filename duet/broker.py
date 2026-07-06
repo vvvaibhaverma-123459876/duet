@@ -7,11 +7,26 @@ from pathlib import Path
 from typing import Callable
 
 from .adapters import Agent, AgentError
+from .logging_setup import get_logger
 from .prompting import build_prompt
 from .stopconditions import StopPolicy, strip_control_tokens
 from .transcript import Message, Transcript
 from .verifiers import Verifier
-from .workspace import commit_after_turn, workspace_state
+from .workspace import WorkspaceError, commit_after_turn, workspace_state
+
+log = get_logger()
+
+MAX_CAPTURE_CHARS = 20000
+
+
+def _cap(text: str, limit: int = MAX_CAPTURE_CHARS) -> str:
+    """Bound stored agent output so a chatty CLI or huge repo cannot exhaust
+    memory or bloat the transcript. Keeps head and tail with a marker."""
+    if len(text) <= limit:
+        return text
+    head = text[: limit // 2].rstrip()
+    tail = text[-limit // 2 :].lstrip()
+    return f"{head}\n...[{len(text) - limit} chars truncated by Duet]...\n{tail}"
 
 
 @dataclass
@@ -80,13 +95,22 @@ def run_session(
         try:
             result = agent.send(prompt, workspace)
         except AgentError as exc:
+            log.warning("turn %s (%s) halted: %s", turn + 1, agent_name, exc)
             transcript.outcome = "halted"
             transcript.stop_condition = "AgentError"
             transcript.error = str(exc)
             session = Session(task, workspace, transcript, "halted", "AgentError")
             return _result(session, save_artifacts(workspace, transcript))
         cleaned, token = strip_control_tokens(result.text)
-        committed = commit_after_turn(workspace, agent_name, agent.display_name)
+        try:
+            committed = commit_after_turn(workspace, agent_name, agent.display_name)
+        except WorkspaceError as exc:
+            log.error("turn %s (%s) commit failed: %s", turn + 1, agent_name, exc)
+            transcript.outcome = "halted"
+            transcript.stop_condition = "WorkspaceError"
+            transcript.error = str(exc)
+            session = Session(task, workspace, transcript, "halted", "WorkspaceError")
+            return _result(session, save_artifacts(workspace, transcript))
         content = cleaned + (f"\n\n[Duet: committed workspace changes]" if committed else "\n\n[Duet: no workspace changes]")
         message = Message(
             turn_index=turn + 1,
@@ -94,8 +118,8 @@ def run_session(
             content=content,
             exit_code=result.exit_code,
             duration_s=result.duration_s,
-            raw_stdout=result.raw_stdout,
-            raw_stderr=result.raw_stderr,
+            raw_stdout=_cap(result.raw_stdout),
+            raw_stderr=_cap(result.raw_stderr),
         )
         transcript.add(message)
         partner_last = cleaned

@@ -2,17 +2,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from pathlib import Path
 
 from . import __version__
 from .broker import run_session
-from .config import load_config, write_config
+from .config import ConfigError, load_config, write_config
 from .doctor import available_agent_names, format_checks, hard_failures, run_doctor
+from .logging_setup import configure_logging, get_logger
 from .repl import Repl
 from .transcript import Transcript
 from .verifiers import AlwaysUnknown, PytestVerifier
-from .workspace import create_workspace, git_log_summary, release_lock, seed_demo
+from .workspace import (
+    LiveRepo,
+    WorkspaceError,
+    create_workspace,
+    git_log_summary,
+    prepare_live_repo,
+    release_lock,
+    rollback_live_repo,
+    seed_demo,
+)
+
+log = get_logger()
 
 
 DEMO_TASK = """Implement and verify roman_to_int in the seeded workspace.
@@ -30,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-color", action="store_true")
     parser.add_argument("--seed-demo", action="store_true")
     parser.add_argument("--version", action="store_true")
+    parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR (or set DUET_LOG)")
+    parser.add_argument("--log-file", default=None, help="also write logs to this file")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("doctor")
@@ -38,6 +53,10 @@ def main(argv: list[str] | None = None) -> int:
         run = sub.add_parser(name)
         run.add_argument("task", nargs="?")
         run.add_argument("--workspace")
+        run.add_argument("--repo", help="operate on an existing git repo (live mode) on an isolated duet/ branch")
+        run.add_argument("--branch", help="branch name to create for the session (live mode)")
+        run.add_argument("--allow-dirty", action="store_true", help="permit uncommitted changes in the target repo")
+        run.add_argument("--rollback-on-failure", action="store_true", help="discard the duet branch if the session does not succeed")
         run.add_argument("--start", choices=["claude", "codex"])
         run.add_argument("--max-turns", type=int)
         run.add_argument("--verify", choices=["pytest", "none"], default="none")
@@ -59,7 +78,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"duet {__version__}")
         return 0
 
-    config = load_config(args.config)
+    configure_logging(args.log_level, args.log_file)
+    _install_signal_handlers()
+
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        print(f"Config error: {exc}", file=sys.stderr)
+        return 1
 
     if args.command == "doctor":
         checks = run_doctor(config)
@@ -97,7 +123,26 @@ def _run_headless(args, config) -> int:
 
     available = available_agent_names(checks)
     agents = {name: agent for name, agent in config.agents.items() if name in available}
-    workspace = create_workspace(args.workspace)
+
+    live: LiveRepo | None = None
+    try:
+        if args.repo:
+            live = prepare_live_repo(args.repo, branch=args.branch, allow_dirty=args.allow_dirty)
+            workspace = live.workspace
+        else:
+            workspace = create_workspace(args.workspace)
+    except WorkspaceError as exc:
+        message = f"Cannot prepare workspace: {exc}"
+        if args.output_format == "json":
+            print(json.dumps({"outcome": "halted", "error": str(exc)}, indent=2))
+        else:
+            print(message, file=sys.stderr)
+        return 1
+
+    if live and args.output_format == "text":
+        print(f"Live repo: {live.workspace} (branch {live.branch}, base {live.base_commit or 'no commits yet'})")
+
+    success = False
     try:
         task = args.task or DEMO_TASK
         if args.seed_demo:
@@ -128,6 +173,8 @@ def _run_headless(args, config) -> int:
             print(f"Outcome: {result.outcome}")
             print(f"Stop condition: {result.stop_condition}")
             print(f"Workspace: {workspace}")
+            if live:
+                print(f"Branch: {live.branch} (review with `git -C {live.workspace} log {live.branch}` and merge deliberately)")
             print(f"Transcript JSON: {result.transcript_path}")
             print(f"Markdown log: {result.markdown_path}")
             if result.session.transcript.error:
@@ -138,9 +185,35 @@ def _run_headless(args, config) -> int:
                 final = verifier.verify(workspace)
                 print("\nFinal pytest:")
                 print(final.output)
-        return 0 if result.outcome == "success" else 2
+        success = result.outcome == "success"
+        return 0 if success else 2
+    except KeyboardInterrupt:
+        log.warning("interrupted by signal; shutting down")
+        print("\nInterrupted; shutting down cleanly.", file=sys.stderr)
+        return 130
     finally:
+        if live and not success:
+            if args.rollback_on_failure:
+                rollback_live_repo(live)
+                print(f"Rolled back: discarded branch {live.branch}.", file=sys.stderr)
+            else:
+                print(f"Duet branch left at {live.branch} for inspection.", file=sys.stderr)
         release_lock(workspace)
+
+
+def _install_signal_handlers() -> None:
+    """Translate SIGTERM into KeyboardInterrupt so the same cleanup path that
+    handles Ctrl-C (releasing locks, saving artifacts) also runs when a
+    supervisor or `kill` stops the process."""
+
+    def _raise_interrupt(signum, frame):
+        raise KeyboardInterrupt()
+
+    for sig in (signal.SIGTERM,):
+        try:
+            signal.signal(sig, _raise_interrupt)
+        except (ValueError, OSError):
+            pass  # not on the main thread, or unsupported platform
 
 
 def _run_interactive(args, config) -> int:

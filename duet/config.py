@@ -9,6 +9,13 @@ import tomllib
 
 from .adapters import CLIAgent
 
+VALID_PROMPT_VIA = {"stdin", "stdin-sentinel", "arg"}
+VALID_OUTPUT_FORMAT = {"text", "text-last-line", "json"}
+
+
+class ConfigError(RuntimeError):
+    """Raised when a Duet config file is missing or malformed."""
+
 
 @dataclass
 class SessionConfig:
@@ -30,30 +37,64 @@ def default_config_path() -> Path:
 
 def load_config(path: str | Path | None = None) -> DuetConfig:
     config_path = discover_config_path(path)
-    data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot read config {config_path}: {exc}") from exc
+    try:
+        data = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"invalid TOML in {config_path}: {exc}") from exc
+
     session_data = data.get("session", {})
-    session = SessionConfig(
-        start_with=session_data.get("start_with", "claude"),
-        max_turns=int(session_data.get("max_turns", 6)),
-        wallclock_seconds=int(session_data.get("wallclock_seconds", 900)),
-        loop_threshold=float(session_data.get("loop_threshold", 0.9)),
-    )
+    try:
+        session = SessionConfig(
+            start_with=session_data.get("start_with", "claude"),
+            max_turns=int(session_data.get("max_turns", 6)),
+            wallclock_seconds=int(session_data.get("wallclock_seconds", 900)),
+            loop_threshold=float(session_data.get("loop_threshold", 0.9)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"invalid [session] values in {config_path}: {exc}") from exc
+
     agents = {}
     for name, item in data.get("agents", {}).items():
-        agents[name] = CLIAgent(
-            name=name,
-            display_name=item.get("display_name", name.title()),
-            command=list(item["command"]),
-            prompt_via=item.get("prompt_via", "stdin"),
-            workspace_flag=item.get("workspace_flag", ""),
-            output_format=item.get("output_format", "text"),
-            result_json_path=item.get("result_json_path", ""),
-            session_json_path=item.get("session_json_path", ""),
-            model=item.get("model", ""),
-            timeout_seconds=int(item.get("timeout_seconds", 300)),
-            stdin_sentinel=item.get("stdin_sentinel", "-"),
-        )
+        agents[name] = _build_agent(name, item, config_path)
     return DuetConfig(session=session, agents=agents)
+
+
+def _build_agent(name: str, item: dict, config_path: Path) -> CLIAgent:
+    command = item.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(part, str) for part in command):
+        raise ConfigError(f"agent '{name}' in {config_path} needs a non-empty string-list 'command'")
+    prompt_via = item.get("prompt_via", "stdin")
+    if prompt_via not in VALID_PROMPT_VIA:
+        raise ConfigError(f"agent '{name}': prompt_via must be one of {sorted(VALID_PROMPT_VIA)}, got {prompt_via!r}")
+    output_format = item.get("output_format", "text")
+    if output_format not in VALID_OUTPUT_FORMAT:
+        raise ConfigError(f"agent '{name}': output_format must be one of {sorted(VALID_OUTPUT_FORMAT)}, got {output_format!r}")
+    result_json_path = item.get("result_json_path", "")
+    if output_format == "json" and not result_json_path:
+        raise ConfigError(f"agent '{name}': output_format='json' requires 'result_json_path'")
+    try:
+        timeout_seconds = int(item.get("timeout_seconds", 300))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"agent '{name}': timeout_seconds must be an integer: {exc}") from exc
+    if timeout_seconds <= 0:
+        raise ConfigError(f"agent '{name}': timeout_seconds must be positive")
+    return CLIAgent(
+        name=name,
+        display_name=item.get("display_name", name.title()),
+        command=list(command),
+        prompt_via=prompt_via,
+        workspace_flag=item.get("workspace_flag", ""),
+        output_format=output_format,
+        result_json_path=result_json_path,
+        session_json_path=item.get("session_json_path", ""),
+        model=item.get("model", ""),
+        timeout_seconds=timeout_seconds,
+        stdin_sentinel=item.get("stdin_sentinel", "-"),
+    )
 
 
 def discover_config_path(path: str | Path | None = None) -> Path:
