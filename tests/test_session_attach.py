@@ -130,3 +130,74 @@ class TestSessionListing:
         repo = tmp_path / "repo"
         repo.mkdir()
         assert list_claude_sessions(repo, claude_home=tmp_path / "claude-home") == []
+
+
+from duet.sessions import format_codex_sessions, format_peek, list_codex_sessions, peek_session
+
+
+def seed_codex_rollout(codex_home: Path, session_id: str, cwd: str) -> Path:
+    day = codex_home / "sessions" / "2026" / "07" / "06"
+    day.mkdir(parents=True, exist_ok=True)
+    path = day / f"rollout-2026-07-06T10-00-00-{session_id}.jsonl"
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": cwd}}),
+        json.dumps({"payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "fix the auth gate"}]}}),
+        json.dumps({"payload": {"type": "function_call", "name": "exec_command", "arguments": '{"cmd":"npm test"}'}}),
+        json.dumps({"payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "tests pass, committing"}]}}),
+        json.dumps({"payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "<environment_context>noise</environment_context>"}]}}),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+class TestCodexSessions:
+    def test_lists_with_cwd_and_preview(self, tmp_path):
+        seed_codex_rollout(tmp_path, "019f3333-e461-7073-8c09-548fcdc7167d", "/work/repo")
+        sessions = list_codex_sessions(codex_home=tmp_path)
+        assert len(sessions) == 1
+        info = sessions[0]
+        assert info.session_id == "019f3333-e461-7073-8c09-548fcdc7167d"
+        assert info.cwd == "/work/repo"
+        assert info.preview == "fix the auth gate"
+        assert "cwd=/work/repo" in format_codex_sessions(sessions)
+
+    def test_missing_home_is_empty(self, tmp_path):
+        assert list_codex_sessions(codex_home=tmp_path / "nope") == []
+
+
+class TestPeek:
+    def test_codex_peek_shows_messages_and_tools_skips_noise(self, tmp_path):
+        path = seed_codex_rollout(tmp_path, "abc", "/work/repo")
+        events = peek_session(path, "codex")
+        assert events == [
+            "[user] fix the auth gate",
+            '[tool exec_command] {"cmd":"npm test"}',
+            "[assistant] tests pass, committing",
+        ]
+
+    def test_claude_peek_parses_project_jsonl(self, tmp_path):
+        path = tmp_path / "session.jsonl"
+        lines = [
+            json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "hello"}]}}),
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "on it"},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+            ]}}),
+            json.dumps({"type": "user", "message": {"role": "user", "content": "<system-reminder>skip me</system-reminder>"}}),
+        ]
+        path.write_text("\n".join(lines) + "\n")
+        events = peek_session(path, "claude")
+        assert events[0] == "[user] hello"
+        assert events[1].startswith("[assistant] on it [tool Bash]")
+        assert len(events) == 2
+
+    def test_peek_limit_keeps_newest(self, tmp_path):
+        path = seed_codex_rollout(tmp_path, "abc", "/work/repo")
+        events = peek_session(path, "codex", limit=1)
+        assert events == ["[assistant] tests pass, committing"]
+
+    def test_format_peek_header(self, tmp_path):
+        path = seed_codex_rollout(tmp_path, "abc", "/work/repo")
+        info = list_codex_sessions(codex_home=tmp_path)[0]
+        rendered = format_peek(info, "codex", peek_session(path, "codex"))
+        assert "read-only peek" in rendered and "cwd=/work/repo" in rendered

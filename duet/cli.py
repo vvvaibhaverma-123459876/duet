@@ -12,7 +12,14 @@ from .config import ConfigError, load_config, write_config
 from .doctor import available_agent_names, format_checks, hard_failures, run_doctor
 from .logging_setup import configure_logging, get_logger
 from .repl import Repl
-from .sessions import format_sessions, list_claude_sessions
+from .sessions import (
+    format_codex_sessions,
+    format_peek,
+    format_sessions,
+    list_claude_sessions,
+    list_codex_sessions,
+    peek_session,
+)
 from .transcript import Transcript
 from .verifiers import AlwaysUnknown, PytestVerifier
 from .workspace import (
@@ -76,9 +83,16 @@ def main(argv: list[str] | None = None) -> int:
             help="carry each agent's CLI session forward between turns instead of stateless spawns",
         )
 
-    sessions = sub.add_parser("sessions", help="list Claude Code sessions available to attach for a repo")
-    sessions.add_argument("--repo", default=".", help="repo the sessions belong to (default: current directory)")
+    sessions = sub.add_parser("sessions", help="list agent CLI sessions available to attach or peek")
+    sessions.add_argument("agent", nargs="?", choices=["claude", "codex"], default="claude")
+    sessions.add_argument("--repo", default=".", help="repo the sessions belong to (claude only; default: current directory)")
     sessions.add_argument("--limit", type=int, default=10)
+
+    peek = sub.add_parser("peek", help="read-only tail of an agent session, safe while it is still running")
+    peek.add_argument("agent", choices=["claude", "codex"])
+    peek.add_argument("session_id", nargs="?", help="session to peek (default: most recently active)")
+    peek.add_argument("--repo", default=".", help="repo the session belongs to (claude only)")
+    peek.add_argument("--lines", type=int, default=30, help="number of recent events to show")
 
     replay = sub.add_parser("replay")
     replay.add_argument("transcript_json")
@@ -109,9 +123,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if hard_failures(checks) else 0
 
     if args.command == "sessions":
-        repo = Path(args.repo)
-        print(format_sessions(repo, list_claude_sessions(repo, limit=args.limit)))
+        if args.agent == "codex":
+            print(format_codex_sessions(list_codex_sessions(limit=args.limit)))
+        else:
+            repo = Path(args.repo)
+            print(format_sessions(repo, list_claude_sessions(repo, limit=args.limit)))
         return 0
+
+    if args.command == "peek":
+        return _peek(args)
 
     if args.command == "replay":
         print(Transcript.load_json(Path(args.transcript_json)).render_markdown(), end="")
@@ -235,6 +255,24 @@ def _run_headless(args, config) -> int:
             else:
                 print(f"Duet branch left at {live.branch} for inspection.", file=sys.stderr)
         release_lock(workspace)
+
+
+def _peek(args) -> int:
+    if args.agent == "codex":
+        candidates = list_codex_sessions(limit=50)
+    else:
+        candidates = list_claude_sessions(Path(args.repo), limit=50)
+    if args.session_id:
+        candidates = [info for info in candidates if info.session_id == args.session_id]
+    if not candidates:
+        where = "" if args.agent == "codex" else f" for repo {Path(args.repo).resolve()}"
+        target = f"session {args.session_id!r}" if args.session_id else "sessions"
+        print(f"No {args.agent} {target} found{where}.", file=sys.stderr)
+        return 1
+    info = candidates[0]
+    events = peek_session(info.path, args.agent, limit=args.lines)
+    print(format_peek(info, args.agent, events))
+    return 0
 
 
 def _apply_attach(agents: dict, specs: list[str]) -> None:

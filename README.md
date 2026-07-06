@@ -59,6 +59,9 @@ duet run "Fix the bug"       # headless one-shot in a scratch workspace
 duet exec "Fix the bug"      # alias for run
 duet doctor                  # preflight
 duet sessions --repo PATH    # list Claude Code sessions available to attach
+duet sessions codex          # list Codex sessions (most recent first, with cwd)
+duet peek codex              # read-only tail of the most recent Codex session
+duet peek claude ID --repo P # same for a Claude Code session of repo P
 duet replay transcript.json  # render markdown
 duet init --project          # write ./duet.toml
 duet init --user             # write ~/.config/duet/config.toml
@@ -127,6 +130,16 @@ messages — this is "continue that agent's memory", not "type into its window".
 Attach to sessions that are idle or finished. Run with `--repo` pointing at the
 same directory the session was recorded in, since Claude Code stores sessions
 per project directory.
+
+To observe a session that is still running, use `duet peek` instead of
+attaching. Peek only reads the session's transcript file (recent messages and
+tool calls, newest last) and never locks, mutates, or forks it:
+
+```bash
+duet sessions codex                 # find the live session and its cwd
+duet peek codex                     # tail the most recent one
+duet peek codex <session-id> --lines 50
+```
 
 ## Production hardening
 
