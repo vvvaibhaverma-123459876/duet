@@ -7,10 +7,12 @@ import sys
 from pathlib import Path
 
 from . import __version__
+from .adapters import AgentError
 from .broker import run_session
 from .config import ConfigError, load_config, write_config
 from .doctor import available_agent_names, format_checks, hard_failures, run_doctor
 from .logging_setup import configure_logging, get_logger
+from .control import running_targets, stop_target
 from .detect import detect_activity, format_activity
 from .repl import Repl
 from .sessions import (
@@ -109,6 +111,20 @@ def main(argv: list[str] | None = None) -> int:
     connect.add_argument("--verify", choices=["pytest", "none"], default="none")
     connect.add_argument("--output-format", choices=["text", "json"], default="text")
 
+    stop = sub.add_parser("stop", help="stop a running duet, claude, or codex session (asks which if ambiguous)")
+    stop.add_argument("kind", nargs="?", choices=["duet", "claude", "codex"], help="what to stop (default: ask)")
+    stop.add_argument("--repo", default=".", help="repo whose duet lock to check (default: current directory)")
+    stop.add_argument("--force", action="store_true", help="SIGTERM instead of SIGINT")
+    stop.add_argument("--yes", action="store_true", help="skip the confirmation prompt (required when not a TTY)")
+
+    talk = sub.add_parser("talk", help="one turn with a single agent, resuming its newest session for the repo")
+    talk.add_argument("agent", choices=["claude", "codex"])
+    talk.add_argument("message", nargs="?", help="message to send (default: read stdin)")
+    talk.add_argument("--repo", default=".", help="repo context (default: current directory)")
+    talk.add_argument("--session", metavar="SESSION_ID", help="session to resume (default: newest for repo)")
+    talk.add_argument("--new", action="store_true", help="start a fresh session instead of resuming")
+    talk.add_argument("--fork-live", action="store_true", help="allow resuming a session that looks live")
+
     peek = sub.add_parser("peek", help="read-only tail of an agent session, safe while it is still running")
     peek.add_argument("agent", choices=["claude", "codex"])
     peek.add_argument("session_id", nargs="?", help="session to peek (default: most recently active)")
@@ -157,6 +173,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "connect":
         return _connect(args, config)
+
+    if args.command == "stop":
+        return _stop(args)
+
+    if args.command == "talk":
+        return _talk(args, config)
 
     if args.command == "peek":
         return _peek(args)
@@ -341,6 +363,78 @@ def _resolve_connect_session(activity, agent: str, explicit: str | None) -> tupl
     if best is None:
         return None, False
     return best.info.session_id, best.live
+
+
+def _stop(args) -> int:
+    targets = running_targets(Path(args.repo))
+    if args.kind:
+        targets = [target for target in targets if target.kind == args.kind]
+    if not targets:
+        what = args.kind or "duet/claude/codex"
+        print(f"Nothing to stop: no running {what} sessions found.", file=sys.stderr)
+        return 1
+    interactive = sys.stdin.isatty()
+    if not interactive and not args.yes:
+        print("Refusing to stop without confirmation: pass --yes (and a kind) when not on a TTY.", file=sys.stderr)
+        return 1
+    chosen: list = []
+    if args.yes:
+        chosen = targets
+    else:
+        print("Running sessions:")
+        for index, target in enumerate(targets, start=1):
+            note = "  <- may be the Claude Code session you are typing in" if target.kind == "claude" else ""
+            print(f"  {index}. {target.describe()}{note}")
+        answer = input("Stop which? (number, 'all', or q to abort): ").strip().lower()
+        if answer in ("q", "quit", ""):
+            print("Aborted; nothing stopped.")
+            return 0
+        if answer == "all":
+            chosen = targets
+        else:
+            try:
+                chosen = [targets[int(answer) - 1]]
+            except (ValueError, IndexError):
+                print(f"No such option: {answer!r}; nothing stopped.", file=sys.stderr)
+                return 1
+    for target in chosen:
+        print(stop_target(target, force=args.force))
+    return 0
+
+
+def _talk(args, config) -> int:
+    if args.agent not in config.agents:
+        print(f"Agent {args.agent!r} is not configured.", file=sys.stderr)
+        return 1
+    agent = config.agents[args.agent]
+    repo = Path(args.repo)
+    if not args.new:
+        session_id, live = _resolve_connect_session(detect_activity(repo), args.agent, args.session)
+        if session_id is None:
+            print(f"No {args.agent} session found for {repo.resolve()}; starting fresh (use --new to silence this).")
+        elif live and not args.fork_live:
+            print(
+                f"{args.agent} session {session_id} looks LIVE. Peek instead (`duet peek {args.agent} {session_id}`) "
+                f"or pass --fork-live to resume anyway.",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            agent.session_id = session_id
+    agent.chain_sessions = True
+    message = args.message or sys.stdin.read()
+    if not message.strip():
+        print("Nothing to send.", file=sys.stderr)
+        return 1
+    try:
+        result = agent.send(message, repo)
+    except AgentError as exc:
+        print(f"{args.agent}: {exc}", file=sys.stderr)
+        return 1
+    print(result.text)
+    if agent.session_id:
+        print(f"\n[session {agent.session_id} — continue with `duet talk {args.agent} --repo {args.repo}`]")
+    return 0
 
 
 def _peek(args) -> int:

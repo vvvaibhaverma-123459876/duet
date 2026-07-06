@@ -62,6 +62,9 @@ duet status --repo PATH      # detect agent sessions/processes for a repo (live 
 duet connect --repo PATH "…" # resume existing claude+codex sessions as one duet
 duet sessions --repo PATH    # list Claude Code sessions available to attach
 duet sessions codex          # list Codex sessions (most recent first, with cwd)
+duet talk claude "..."       # one solo turn, resuming that agent's newest session
+duet stop                    # list running duet/claude/codex sessions, pick one to stop
+duet stop codex --yes        # stop without prompting (SIGINT; --force for SIGTERM)
 duet peek codex              # read-only tail of the most recent Codex session
 duet peek claude ID --repo P # same for a Claude Code session of repo P
 duet replay transcript.json  # render markdown
@@ -170,6 +173,23 @@ Multiple duets can run in parallel: each `duet run`/`connect` takes a workspace
 lock and its own `duet/session-*` branch, so concurrent sessions on different
 repos (or worktrees of one repo) do not interfere. Duet does not open terminal
 windows for you; run each session in its own terminal or under `tmux`.
+
+## Controlling sessions individually
+
+`duet talk` continues one agent on its own — no broker, no partner, no branch
+isolation (the agent acts directly in `--repo` with the same permissions as a
+duet turn). It resumes the agent's newest session for the repo (live guard
+applies), sends one message, prints the reply and the session id to continue
+from. `--new` starts fresh; `--session ID` picks a specific session.
+
+`duet stop` handles shutdown. With no arguments it lists everything stoppable —
+a duet run holding the repo's lock (by pid), and any claude/codex CLI processes
+(by tty and runtime, since an outside process cannot be tied to a session file)
+— and asks which to stop. It sends SIGINT (what Ctrl-C in that terminal would
+do) so the agent exits cleanly; `--force` escalates to SIGTERM. `--yes` skips
+the prompt and is required when stdin is not a TTY. Stopping an agent's TUI
+does not destroy its session: the transcript stays on disk and `duet connect`,
+`duet talk`, or the agent's own resume command can pick it up later.
 
 ## Production hardening
 
