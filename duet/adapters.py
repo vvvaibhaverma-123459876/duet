@@ -56,6 +56,7 @@ class CLIAgent:
     resume_command: list[str] = field(default_factory=list)
     session_id: str = ""
     chain_sessions: bool = False
+    last_session_id: str = ""
 
     def build_command(self, prompt: str, workspace: Path) -> tuple[list[str], str | None]:
         template = self.resume_command if self.session_id and self.resume_command else self.command
@@ -127,10 +128,14 @@ class CLIAgent:
             raise AgentError(f"{self.name}: produced empty output. Command: {_redacted_cmd(cmd)}. stderr: {_tail(stderr)}")
         if warning:
             text = f"{text.strip()}\n\n[Duet warning: {warning}]"
-        if self.chain_sessions and session_id:
-            # Resumed sessions get a fresh id on each turn; adopt it so the
-            # next send() continues the same conversation, not a stale fork.
-            self.session_id = session_id
+        if session_id:
+            # Always remember the newest id so a later `duet resume` can
+            # re-attach this conversation even from a non-chained run.
+            self.last_session_id = session_id
+            if self.chain_sessions:
+                # Resumed sessions get a fresh id on each turn; adopt it so the
+                # next send() continues the same conversation, not a stale fork.
+                self.session_id = session_id
         return AgentResult(
             text=text.strip(),
             exit_code=proc.returncode,

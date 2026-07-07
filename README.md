@@ -62,6 +62,7 @@ duet status --repo PATH      # detect agent sessions/processes for a repo (live 
 duet connect --repo PATH "…" # resume existing claude+codex sessions as one duet
 duet sessions --repo PATH    # list Claude Code sessions available to attach
 duet sessions codex          # list Codex sessions (most recent first, with cwd)
+duet resume --repo PATH      # continue the last duet run there, re-attaching both agents
 duet talk claude "..."       # one solo turn, resuming that agent's newest session
 duet stop                    # list running duet/claude/codex sessions, pick one to stop
 duet stop codex --yes        # stop without prompting (SIGINT; --force for SIGTERM)
@@ -195,6 +196,26 @@ usage-limit signals) and handled per the `--on-quota` policy, configurable in
 `duet doctor` (run automatically before headless sessions) does an
 authenticated round-trip per agent, so a limit that is already exhausted
 aborts the run before any turns are spent.
+
+### Resuming after the limit resets
+
+Every run saves a resume manifest (`.duet/resume.json` in the workspace) with
+the task, outcome, stop condition, and each agent's last session id. When the
+limit is back:
+
+```bash
+duet resume --repo /path/to/project              # re-attach both agents, continue the task
+duet resume --repo /path/to/project --wait-ready # poll doctor every 10 min until agents
+                                                 # pass their round-trip, then auto-resume
+```
+
+`resume` re-attaches every agent that has a saved session id (cold-starting
+any that don't), reuses the same workspace so committed turns are visible, and
+prepends a note telling the agents this is a continuation, not a fresh start.
+`--wait-ready [SECONDS]` turns it into the full loop for a quota halt: park,
+probe (each probe is one doctor round-trip per agent — rate-limited calls are
+rejected without drawing usage), and continue automatically the moment the
+limit resets.
 
 ## Controlling sessions individually
 

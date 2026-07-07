@@ -4,6 +4,7 @@ import argparse
 import json
 import signal
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -15,6 +16,7 @@ from .logging_setup import configure_logging, get_logger
 from .control import running_targets, stop_target
 from .detect import detect_activity, format_activity
 from .repl import Repl
+from .resumestate import ResumeError, ResumeState, load_resume_state, save_resume_state
 from .sessions import (
     format_codex_sessions,
     format_peek,
@@ -120,6 +122,26 @@ def main(argv: list[str] | None = None) -> int:
     connect.add_argument("--on-quota", choices=["halt", "solo", "wait"], default=None)
     connect.add_argument("--quota-wait-seconds", type=int, default=None)
 
+    resume = sub.add_parser("resume", help="continue the last duet run in a workspace/repo, re-attaching both agents")
+    resume.add_argument("task", nargs="?", help="override the continuation prompt (default: continue the saved task)")
+    resume.add_argument("--repo", default=".", help="workspace or repo of the halted run (default: current directory)")
+    resume.add_argument(
+        "--wait-ready",
+        nargs="?",
+        type=int,
+        const=600,
+        default=None,
+        metavar="SECONDS",
+        help="poll doctor every SECONDS (default 600) until all saved agents pass, e.g. after a quota halt",
+    )
+    resume.add_argument("--max-turns", type=int)
+    resume.add_argument("--verify", choices=["pytest", "none"], default="none")
+    resume.add_argument("--start", choices=["claude", "codex"])
+    resume.add_argument("--allow-dirty", action="store_true")
+    resume.add_argument("--output-format", choices=["text", "json"], default="text")
+    resume.add_argument("--on-quota", choices=["halt", "solo", "wait"], default=None)
+    resume.add_argument("--quota-wait-seconds", type=int, default=None)
+
     stop = sub.add_parser("stop", help="stop a running duet, claude, or codex session (asks which if ambiguous)")
     stop.add_argument("kind", nargs="?", choices=["duet", "claude", "codex"], help="what to stop (default: ask)")
     stop.add_argument("--repo", default=".", help="repo whose duet lock to check (default: current directory)")
@@ -182,6 +204,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "connect":
         return _connect(args, config)
+
+    if args.command == "resume":
+        return _resume(args, config)
 
     if args.command == "stop":
         return _stop(args)
@@ -280,6 +305,24 @@ def _run_headless(args, config) -> int:
             on_quota=getattr(args, "on_quota", None) or config.session.on_quota,
             quota_wait_seconds=getattr(args, "quota_wait_seconds", None) or config.session.quota_wait_seconds,
         )
+        try:
+            save_resume_state(
+                workspace,
+                ResumeState(
+                    task=task,
+                    outcome=result.outcome,
+                    stop_condition=result.stop_condition,
+                    mode="live" if live else "scratch",
+                    workspace=str(workspace),
+                    sessions={
+                        name: (getattr(agent, "last_session_id", "") or getattr(agent, "session_id", ""))
+                        for name, agent in agents.items()
+                    },
+                    branch=live.branch if live else "",
+                ),
+            )
+        except OSError as exc:
+            log.warning("could not save resume manifest: %s", exc)
         if args.output_format == "json":
             print(json.dumps(result.to_dict(), indent=2))
         else:
@@ -378,6 +421,61 @@ def _resolve_connect_session(activity, agent: str, explicit: str | None) -> tupl
     if best is None:
         return None, False
     return best.info.session_id, best.live
+
+
+def _resume(args, config) -> int:
+    workspace = Path(args.repo)
+    try:
+        state = load_resume_state(workspace)
+    except ResumeError as exc:
+        print(f"Cannot resume: {exc}", file=sys.stderr)
+        return 1
+    specs = state.attach_specs()
+    print(f"Resuming duet in {workspace.resolve()} (previous outcome: {state.outcome}, {state.stop_condition or 'no stop condition'})")
+    for spec in specs:
+        print(f"  re-attaching {spec}")
+    missing = [name for name, session_id in state.sessions.items() if not session_id]
+    for name in missing:
+        print(f"  {name}: no saved session id — cold start")
+
+    if args.wait_ready is not None:
+        interval = max(args.wait_ready, 30)
+        wanted = set(state.sessions)
+        while True:
+            checks = run_doctor(config)
+            ready = wanted & available_agent_names(checks)
+            if ready == wanted:
+                print("All agents ready; resuming now.", flush=True)
+                break
+            waiting_for = ", ".join(sorted(wanted - ready))
+            # Flush so progress is visible even when output is redirected to a log.
+            print(f"Not ready yet ({waiting_for}); retrying in {interval}s. Ctrl-C to abort.", flush=True)
+            time.sleep(interval)
+
+    task = args.task or (
+        f"{state.task}\n\n[Duet: this is a resumed session. The previous run ended with "
+        f"outcome={state.outcome} ({state.stop_condition or 'n/a'}). Review the workspace and your own "
+        f"memory of prior turns, then continue from where the work stopped instead of starting over.]"
+    )
+    run_args = argparse.Namespace(
+        task=task,
+        workspace=None if state.mode == "live" else str(workspace),
+        repo=str(workspace) if state.mode == "live" else None,
+        branch=None,
+        allow_dirty=args.allow_dirty,
+        rollback_on_failure=False,
+        start=args.start,
+        max_turns=args.max_turns,
+        verify=args.verify,
+        seed_demo=False,
+        interactive_handoff=False,
+        output_format=args.output_format,
+        attach=specs,
+        chain_sessions=True,
+        on_quota=args.on_quota,
+        quota_wait_seconds=args.quota_wait_seconds,
+    )
+    return _run_headless(run_args, config)
 
 
 def _stop(args) -> int:
