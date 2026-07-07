@@ -11,6 +11,7 @@ from typing import Protocol
 
 SESSION_ID_PLACEHOLDER = "{session_id}"
 WORKSPACE_PLACEHOLDER = "{workspace}"
+DEFAULT_QUOTA_MARKERS = ("rate limit", "rate-limit", "quota", "usage limit", "billing", "too many requests", "429")
 
 
 class AgentError(RuntimeError):
@@ -30,6 +31,7 @@ class AgentResult:
     raw_stdout: str
     raw_stderr: str
     session_id: str | None = None
+    cost_usd: float = 0.0
 
 
 class Agent(Protocol):
@@ -57,6 +59,8 @@ class CLIAgent:
     session_id: str = ""
     chain_sessions: bool = False
     last_session_id: str = ""
+    cost_json_path: str = ""
+    quota_markers: list[str] = field(default_factory=lambda: list(DEFAULT_QUOTA_MARKERS))
 
     def build_command(self, prompt: str, workspace: Path) -> tuple[list[str], str | None]:
         template = self.resume_command if self.session_id and self.resume_command else self.command
@@ -115,10 +119,10 @@ class CLIAgent:
         except FileNotFoundError as exc:
             raise AgentError(f"{self.name}: executable not found: {cmd[0]}. Command: {_redacted_cmd(cmd)}") from exc
         duration = time.monotonic() - started
-        text, session_id, warning = self._parse_output(stdout)
+        text, session_id, cost_usd, warning = self._parse_output(stdout)
         if proc.returncode != 0:
             detail = text or _tail(stderr) or _tail(stdout)
-            if _looks_like_quota(detail + stderr):
+            if _looks_like_quota(detail + stderr, self.quota_markers):
                 raise QuotaError(
                     f"{self.name}: exited {proc.returncode}. quota/rate-limit suspected. "
                     f"Command: {_redacted_cmd(cmd)}. Output: {detail}"
@@ -143,19 +147,20 @@ class CLIAgent:
             raw_stdout=stdout,
             raw_stderr=stderr,
             session_id=session_id,
+            cost_usd=cost_usd,
         )
 
-    def _parse_output(self, stdout: str) -> tuple[str, str | None, str]:
+    def _parse_output(self, stdout: str) -> tuple[str, str | None, float, str]:
         if self.output_format == "text":
-            return stdout.strip(), None, ""
+            return stdout.strip(), None, 0.0, ""
         if self.output_format == "text-last-line":
             section = _extract_cli_speaker_section(stdout, self.name)
             if section:
-                return section, None, ""
+                return section, None, 0.0, ""
             if "[[DONE]]" in stdout or "[[HANDOFF]]" in stdout:
-                return stdout.strip(), None, ""
+                return stdout.strip(), None, 0.0, ""
             lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-            return (lines[-1] if lines else ""), None, ""
+            return (lines[-1] if lines else ""), None, 0.0, ""
         if self.output_format == "json":
             try:
                 payload = json.loads(stdout)
@@ -163,9 +168,16 @@ class CLIAgent:
                 session_id = _get_dotted(payload, self.session_json_path) if self.session_json_path else None
                 if not isinstance(text, str):
                     raise AgentError(f"{self.name}: JSON path {self.result_json_path!r} did not resolve to text")
-                return text, str(session_id) if session_id is not None else None, ""
+                cost = 0.0
+                if self.cost_json_path:
+                    try:
+                        raw_cost = _get_dotted(payload, self.cost_json_path)
+                        cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+                    except AgentError:
+                        cost = 0.0  # cost is best-effort; never fail a turn over it
+                return text, str(session_id) if session_id is not None else None, cost, ""
             except (json.JSONDecodeError, AgentError) as exc:
-                return stdout.strip(), None, f"expected JSON output but fell back to raw stdout: {exc}"
+                return stdout.strip(), None, 0.0, f"expected JSON output but fell back to raw stdout: {exc}"
         raise AgentError(f"{self.name}: unsupported output_format={self.output_format!r}")
 
 
@@ -227,6 +239,6 @@ def _tail(text: str, limit: int = 1200) -> str:
     return stripped[-limit:] if len(stripped) > limit else stripped
 
 
-def _looks_like_quota(text: str) -> bool:
+def _looks_like_quota(text: str, markers: tuple[str, ...] | list[str] = DEFAULT_QUOTA_MARKERS) -> bool:
     lowered = text.lower()
-    return any(word in lowered for word in ("rate limit", "quota", "usage limit", "billing"))
+    return any(marker.lower() in lowered for marker in markers)

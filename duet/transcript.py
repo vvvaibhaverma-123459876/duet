@@ -16,6 +16,7 @@ class Message:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     raw_stdout: str = ""
     raw_stderr: str = ""
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -27,6 +28,7 @@ class Transcript:
     workspace: str = ""
     error: str = ""
     notes: list[str] = field(default_factory=list)
+    total_cost_usd: float = 0.0
 
     def add(self, message: Message) -> None:
         self.messages.append(message)
@@ -43,6 +45,7 @@ class Transcript:
             "workspace": self.workspace,
             "error": self.error,
             "notes": list(self.notes),
+            "total_cost_usd": self.total_cost_usd,
         }
 
     @classmethod
@@ -54,6 +57,7 @@ class Transcript:
             workspace=data.get("workspace", ""),
             error=data.get("error", ""),
             notes=list(data.get("notes", [])),
+            total_cost_usd=float(data.get("total_cost_usd", 0.0)),
         )
         transcript.messages = [Message(**item) for item in data.get("messages", [])]
         return transcript

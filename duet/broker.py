@@ -75,6 +75,7 @@ def run_session(
     require_all_agents_for_success: bool = True,
     on_quota: str = "halt",
     quota_wait_seconds: int = 300,
+    budget_usd: float = 0.0,
 ) -> SessionResult:
     if start_with not in agents:
         raise ValueError(f"unknown start agent: {start_with}")
@@ -88,6 +89,7 @@ def run_session(
     policy = StopPolicy(max_turns, wallclock_seconds, loop_threshold, verifier)
     started_at = time.monotonic()
     partner_last = ""
+    spent_usd = 0.0
 
     turn = 0
     while turn < max_turns:
@@ -157,8 +159,20 @@ def run_session(
             duration_s=result.duration_s,
             raw_stdout=_cap(result.raw_stdout),
             raw_stderr=_cap(result.raw_stderr),
+            cost_usd=result.cost_usd,
         )
         transcript.add(message)
+        spent_usd += result.cost_usd
+        transcript.total_cost_usd = spent_usd
+        if budget_usd > 0 and spent_usd >= budget_usd:
+            note = f"budget exhausted: ${spent_usd:.4f} spent of ${budget_usd:.2f} cap (reported costs only)"
+            transcript.note(note)
+            if on_turn:
+                on_turn(f"[Duet: {note}]")
+            transcript.outcome = "halted"
+            transcript.stop_condition = f"BudgetExceeded(${budget_usd:.2f})"
+            session = Session(task, workspace, transcript, "halted", transcript.stop_condition)
+            return _result(session, save_artifacts(workspace, transcript))
         partner_last = cleaned
         if on_turn:
             on_turn(f"{agent.display_name} ({result.duration_s:.2f}s):\n{cleaned}")

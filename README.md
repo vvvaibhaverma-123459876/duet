@@ -63,6 +63,7 @@ duet connect --repo PATH "…" # resume existing claude+codex sessions as one du
 duet sessions --repo PATH    # list Claude Code sessions available to attach
 duet sessions codex          # list Codex sessions (most recent first, with cwd)
 duet resume --repo PATH      # continue the last duet run there, re-attaching both agents
+duet ps                      # list recent duet runs on this machine (status + cost)
 duet talk claude "..."       # one solo turn, resuming that agent's newest session
 duet stop                    # list running duet/claude/codex sessions, pick one to stop
 duet stop codex --yes        # stop without prompting (SIGINT; --force for SIGTERM)
@@ -174,6 +175,41 @@ Multiple duets can run in parallel: each `duet run`/`connect` takes a workspace
 lock and its own `duet/session-*` branch, so concurrent sessions on different
 repos (or worktrees of one repo) do not interfere. Duet does not open terminal
 windows for you; run each session in its own terminal or under `tmux`.
+
+## Verification gates
+
+`--verify` accepts `pytest`, `none`, or `cmd:<shell command>`, and can be
+repeated to form an all-must-pass composite. While the gate fails, an agent's
+`[[DONE]]` is not honored — "done" means the checks actually pass, not that
+the agents agree they're finished:
+
+```bash
+duet run --repo . \
+  --verify "cmd:cd frontend && npm test" \
+  --verify "cmd:cd frontend && npx tsc --noEmit" \
+  "Fix the dashboard health check"
+```
+
+## Worktree isolation
+
+`--worktree` (on `run`/`exec`/`connect`/`resume`) runs the session in a linked
+`git worktree` created from HEAD. Your checkout — current branch, index, open
+editors, a live agent TUI sitting in the repo — is never switched or touched.
+The session branch lands in the main repo as usual; the worktree is kept for
+inspection (cleanup command printed at the end), and `--rollback-on-failure`
+removes both worktree and branch.
+
+## Cost tracking and budgets
+
+Agents that report spend (Claude Code's JSON output includes
+`total_cost_usd`; configured via `cost_json_path`) have per-turn cost recorded
+in the transcript and summed in the summary. `--budget-usd X` (or
+`[session] budget_usd`) halts the session once reported spend reaches the cap
+— resumable exactly like a quota halt. Codex CLI reports no cost, so the cap
+tracks reported costs only; turn/wallclock caps remain the backstop.
+
+`duet ps` lists recent runs on the machine (from `~/.local/state/duet`), with
+live status (running / success / halted / died) and reported cost.
 
 ## When an agent runs out of usage limit
 

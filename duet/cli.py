@@ -25,8 +25,9 @@ from .sessions import (
     list_codex_sessions,
     peek_session,
 )
+from .registry import finish_run, format_runs, list_runs, register_run
 from .transcript import Transcript
-from .verifiers import AlwaysUnknown, PytestVerifier
+from .verifiers import AlwaysUnknown, PytestVerifier, build_verifier
 from .workspace import (
     LiveRepo,
     WorkspaceError,
@@ -34,6 +35,7 @@ from .workspace import (
     git_log_summary,
     prepare_live_repo,
     release_lock,
+    remove_worktree,
     rollback_live_repo,
     seed_demo,
 )
@@ -72,7 +74,15 @@ def main(argv: list[str] | None = None) -> int:
         run.add_argument("--rollback-on-failure", action="store_true", help="discard the duet branch if the session does not succeed")
         run.add_argument("--start", choices=["claude", "codex"])
         run.add_argument("--max-turns", type=int)
-        run.add_argument("--verify", choices=["pytest", "none"], default="none")
+        run.add_argument(
+            "--verify",
+            action="append",
+            default=None,
+            metavar="SPEC",
+            help="verification gate: pytest, none, or cmd:<shell command>; repeat for an all-must-pass composite",
+        )
+        run.add_argument("--worktree", action="store_true", help="run in an isolated git worktree; your checkout is never switched")
+        run.add_argument("--budget-usd", type=float, default=None, help="halt when reported model cost reaches this (Claude reports cost; Codex CLI does not)")
         run.add_argument("--seed-demo", action="store_true")
         run.add_argument("--interactive-handoff", action="store_true")
         run.add_argument("--output-format", choices=["text", "json"], default="text")
@@ -100,6 +110,9 @@ def main(argv: list[str] | None = None) -> int:
     sessions.add_argument("--repo", default=".", help="repo the sessions belong to (claude only; default: current directory)")
     sessions.add_argument("--limit", type=int, default=10)
 
+    ps = sub.add_parser("ps", help="list recent duet runs on this machine with their status")
+    ps.add_argument("--limit", type=int, default=15)
+
     status = sub.add_parser("status", help="detect agent sessions and processes relevant to a repo")
     status.add_argument("--repo", default=".", help="repo to inspect (default: current directory)")
 
@@ -117,7 +130,9 @@ def main(argv: list[str] | None = None) -> int:
     connect.add_argument("--rollback-on-failure", action="store_true")
     connect.add_argument("--start", choices=["claude", "codex"])
     connect.add_argument("--max-turns", type=int)
-    connect.add_argument("--verify", choices=["pytest", "none"], default="none")
+    connect.add_argument("--verify", action="append", default=None, metavar="SPEC")
+    connect.add_argument("--worktree", action="store_true")
+    connect.add_argument("--budget-usd", type=float, default=None)
     connect.add_argument("--output-format", choices=["text", "json"], default="text")
     connect.add_argument("--on-quota", choices=["halt", "solo", "wait"], default=None)
     connect.add_argument("--quota-wait-seconds", type=int, default=None)
@@ -135,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
         help="poll doctor every SECONDS (default 600) until all saved agents pass, e.g. after a quota halt",
     )
     resume.add_argument("--max-turns", type=int)
-    resume.add_argument("--verify", choices=["pytest", "none"], default="none")
+    resume.add_argument("--verify", action="append", default=None, metavar="SPEC")
+    resume.add_argument("--worktree", action="store_true")
+    resume.add_argument("--budget-usd", type=float, default=None)
     resume.add_argument("--start", choices=["claude", "codex"])
     resume.add_argument("--allow-dirty", action="store_true")
     resume.add_argument("--output-format", choices=["text", "json"], default="text")
@@ -196,6 +213,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             repo = Path(args.repo)
             print(format_sessions(repo, list_claude_sessions(repo, limit=args.limit)))
+        return 0
+
+    if args.command == "ps":
+        print(format_runs(list_runs(args.limit)))
         return 0
 
     if args.command == "status":
@@ -264,7 +285,12 @@ def _run_headless(args, config) -> int:
     live: LiveRepo | None = None
     try:
         if args.repo:
-            live = prepare_live_repo(args.repo, branch=args.branch, allow_dirty=args.allow_dirty)
+            live = prepare_live_repo(
+                args.repo,
+                branch=args.branch,
+                allow_dirty=args.allow_dirty,
+                worktree=getattr(args, "worktree", False),
+            )
             workspace = live.workspace
         else:
             workspace = create_workspace(args.workspace)
@@ -277,9 +303,12 @@ def _run_headless(args, config) -> int:
         return 1
 
     if live and args.output_format == "text":
-        print(f"Live repo: {live.workspace} (branch {live.branch}, base {live.base_commit or 'no commits yet'})")
+        kind = f"worktree of {live.worktree_of}" if live.worktree_of else "live repo"
+        print(f"Live repo: {live.workspace} ({kind}, branch {live.branch}, base {live.base_commit or 'no commits yet'})")
 
     success = False
+    run_id = None
+    finished = False
     try:
         task = args.task or DEMO_TASK
         if args.seed_demo:
@@ -289,7 +318,17 @@ def _run_headless(args, config) -> int:
         if start not in agents:
             start = next(iter(agents))
         max_turns = args.max_turns or config.session.max_turns
-        verifier = PytestVerifier() if args.verify == "pytest" or args.seed_demo else AlwaysUnknown()
+        verify_specs = list(getattr(args, "verify", None) or [])
+        if args.seed_demo and not verify_specs:
+            verify_specs = ["pytest"]
+        try:
+            verifier = build_verifier(verify_specs)
+        except ValueError as exc:
+            print(f"Invalid --verify: {exc}", file=sys.stderr)
+            return 1
+        budget = getattr(args, "budget_usd", None)
+        budget = config.session.budget_usd if budget is None else budget
+        run_id = register_run(workspace, live.branch if live else "", task)
         result = run_session(
             task=task,
             workspace=workspace,
@@ -304,7 +343,10 @@ def _run_headless(args, config) -> int:
             require_all_agents_for_success=len(agents) > 1,
             on_quota=getattr(args, "on_quota", None) or config.session.on_quota,
             quota_wait_seconds=getattr(args, "quota_wait_seconds", None) or config.session.quota_wait_seconds,
+            budget_usd=budget,
         )
+        finish_run(run_id, result.outcome, result.session.transcript.total_cost_usd)
+        finished = True
         try:
             save_resume_state(
                 workspace,
@@ -329,6 +371,8 @@ def _run_headless(args, config) -> int:
             print("\n=== Duet summary ===")
             print(f"Outcome: {result.outcome}")
             print(f"Stop condition: {result.stop_condition}")
+            if result.session.transcript.total_cost_usd:
+                print(f"Model cost: ${result.session.transcript.total_cost_usd:.4f} (agents that report it; Codex CLI reports none)")
             for note in result.session.transcript.notes:
                 print(f"Note: {note}")
             print(f"Workspace: {workspace}")
@@ -354,12 +398,24 @@ def _run_headless(args, config) -> int:
         print("\nInterrupted; shutting down cleanly.", file=sys.stderr)
         return 130
     finally:
+        if run_id and not finished:
+            finish_run(run_id, "interrupted")
         if live and not success:
             if args.rollback_on_failure:
-                rollback_live_repo(live)
-                print(f"Rolled back: discarded branch {live.branch}.", file=sys.stderr)
+                if live.worktree_of:
+                    remove_worktree(live, delete_branch=True)
+                    print(f"Rolled back: removed worktree and branch {live.branch}.", file=sys.stderr)
+                else:
+                    rollback_live_repo(live)
+                    print(f"Rolled back: discarded branch {live.branch}.", file=sys.stderr)
             else:
                 print(f"Duet branch left at {live.branch} for inspection.", file=sys.stderr)
+        if live and live.worktree_of and (success or not args.rollback_on_failure):
+            print(
+                f"Worktree kept at {live.workspace}; branch {live.branch} is in {live.worktree_of}. "
+                f"Clean up with: git -C {live.worktree_of} worktree remove {live.workspace}",
+                file=sys.stderr,
+            )
         release_lock(workspace)
 
 
@@ -406,6 +462,8 @@ def _connect(args, config) -> int:
         chain_sessions=True,
         on_quota=args.on_quota,
         quota_wait_seconds=args.quota_wait_seconds,
+        worktree=args.worktree,
+        budget_usd=args.budget_usd,
     )
     return _run_headless(run_args, config)
 
@@ -474,6 +532,8 @@ def _resume(args, config) -> int:
         chain_sessions=True,
         on_quota=args.on_quota,
         quota_wait_seconds=args.quota_wait_seconds,
+        worktree=args.worktree,
+        budget_usd=args.budget_usd,
     )
     return _run_headless(run_args, config)
 

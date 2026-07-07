@@ -40,7 +40,15 @@ def _exclude_duet_dir(workspace: Path) -> None:
     """Keep Duet's own bookkeeping (`.duet/`, incl. the session lock) out of
     `git add -A` via `.git/info/exclude`. This is local-only and never itself
     committed, so it does not touch the user's tracked `.gitignore`."""
-    exclude = workspace / ".git" / "info" / "exclude"
+    # `git rev-parse --git-path` resolves correctly for linked worktrees too,
+    # where `.git` is a file pointing at the common dir.
+    probe = subprocess.run(
+        ["git", "rev-parse", "--git-path", "info/exclude"], cwd=workspace, text=True, capture_output=True
+    )
+    if probe.returncode == 0 and probe.stdout.strip():
+        exclude = (workspace / probe.stdout.strip()).resolve() if not Path(probe.stdout.strip()).is_absolute() else Path(probe.stdout.strip())
+    else:
+        exclude = workspace / ".git" / "info" / "exclude"
     try:
         exclude.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
@@ -157,6 +165,7 @@ class LiveRepo:
     original_ref: str
     base_commit: str | None
     preexisting_stash: str | None = None
+    worktree_of: Path | None = None  # set when workspace is a linked worktree of this repo
 
 
 def _git_out(args: list[str], cwd: Path) -> str:
@@ -173,8 +182,13 @@ def is_git_worktree(path: Path) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
-def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = False) -> LiveRepo:
-    """Prepare an existing git repo for a Duet session on an isolated branch."""
+def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = False, worktree: bool = False) -> LiveRepo:
+    """Prepare an existing git repo for a Duet session on an isolated branch.
+
+    With worktree=True the session runs in a linked `git worktree` created from
+    HEAD, so the user's checkout (current branch, index, open editors, live
+    agent TUIs) is never switched or touched. Uncommitted changes are not
+    carried into the worktree."""
     repo = Path(path).expanduser()
     if not repo.exists():
         raise WorkspaceError(f"repo path does not exist: {repo}")
@@ -184,6 +198,10 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
         raise WorkspaceError(f"not a git work tree: {repo}. Run `git init` there first, or use a scratch workspace.")
 
     top = Path(_git_out(["rev-parse", "--show-toplevel"], repo))
+
+    if worktree:
+        return _prepare_worktree(top, branch)
+
     dirty = bool(_git_out(["status", "--porcelain"], repo))
     if dirty and not allow_dirty:
         raise WorkspaceError(
@@ -222,6 +240,44 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
         base_commit=base_commit,
         preexisting_stash=preexisting_stash,
     )
+
+
+def _prepare_worktree(top: Path, branch: str | None) -> LiveRepo:
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=top, text=True, capture_output=True)
+    if head.returncode != 0:
+        raise WorkspaceError(f"cannot use --worktree on a repo with no commits: {top}")
+    base_commit = head.stdout.strip()
+    original = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], cwd=top, text=True, capture_output=True)
+    original_ref = original.stdout.strip() or base_commit
+
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    branch = branch or _unique_branch(top, f"duet/session-{stamp}")
+    wt_dir = Path(tempfile.mkdtemp(prefix="duet-wt-"))
+    # mkdtemp creates the dir; `git worktree add` wants to create it itself.
+    wt_dir.rmdir()
+    _run(["git", "worktree", "add", "-b", branch, str(wt_dir), "HEAD"], top)
+    _exclude_duet_dir(wt_dir)
+    acquire_lock(wt_dir)
+    log.info("prepared worktree %s for %s on branch %s (base=%s)", wt_dir, top, branch, base_commit)
+    return LiveRepo(
+        workspace=wt_dir,
+        branch=branch,
+        original_ref=original_ref,
+        base_commit=base_commit,
+        worktree_of=top,
+    )
+
+
+def remove_worktree(live: LiveRepo, delete_branch: bool = False) -> None:
+    """Detach a session worktree. The branch (and its commits) stay in the main
+    repo unless delete_branch is set (rollback)."""
+    if not live.worktree_of:
+        return
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", str(live.workspace)], cwd=live.worktree_of, capture_output=True
+    )
+    if delete_branch:
+        subprocess.run(["git", "branch", "-D", live.branch], cwd=live.worktree_of, capture_output=True)
 
 
 def _unique_branch(top: Path, base: str) -> str:

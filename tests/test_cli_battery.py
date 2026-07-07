@@ -23,7 +23,7 @@ case "${FC_MODE:-done}" in
   edit)    echo "line-$n" >> file.txt; [[ $n -ge 2 ]] && r="edited [[DONE]]" || r="edited [[HANDOFF]]" ;;
   fail)    echo "boom" >&2; exit 3 ;;
 esac
-python3 -c "import json,sys;print(json.dumps({'result':sys.argv[1],'session_id':f'fc-$n'}))" "$r"
+python3 -c "import json,sys;print(json.dumps({'result':sys.argv[1],'session_id':f'fc-$n','total_cost_usd':0.25}))" "$r"
 """
 
 FAKE_CODEX = r"""#!/bin/bash
@@ -56,6 +56,7 @@ workspace_flag = ""
 output_format = "json"
 result_json_path = "result"
 session_json_path = "session_id"
+cost_json_path = "total_cost_usd"
 resume_command = ["{fc}", "--resume", "{{session_id}}"]
 timeout_seconds = 5
 
@@ -238,6 +239,72 @@ class TestResume:
         proc = duet("resume", "--repo", str(tmp_path))
         assert proc.returncode == 1
         assert "cannot read" in proc.stderr
+
+
+class TestWorktree:
+    def test_worktree_run_never_switches_checkout(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        before = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo, capture_output=True, text=True).stdout
+        proc = duet("run", "--repo", str(repo), "--worktree", "t", env={"FC_MODE": "edit"})
+        after = subprocess.run(["git", "symbolic-ref", "--short", "HEAD"], cwd=repo, capture_output=True, text=True).stdout
+        assert before == after, "worktree mode must not switch the user's checkout"
+        assert "worktree of" in proc.stdout
+        assert "Worktree kept at" in proc.stderr
+        branches = subprocess.run(
+            ["git", "branch", "--list", "duet/session-*"], cwd=repo, capture_output=True, text=True
+        ).stdout
+        assert branches.strip(), "duet branch must exist in the main repo"
+
+    def test_worktree_rollback_cleans_everything(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        duet("run", "--repo", str(repo), "--worktree", "--rollback-on-failure", "t", env={"FC_MODE": "fail"})
+        branches = subprocess.run(["git", "branch", "--list", "duet/*"], cwd=repo, capture_output=True, text=True).stdout
+        assert branches.strip() == ""
+        worktrees = subprocess.run(["git", "worktree", "list"], cwd=repo, capture_output=True, text=True).stdout
+        assert "duet-wt-" not in worktrees
+
+
+class TestVerifyAndBudget:
+    def test_command_verifier_gates_done(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        # Verifier fails => [[DONE]] is not honored => session runs out of turns.
+        proc = duet("run", "--repo", str(repo), "--max-turns", "2", "--verify", "cmd:exit 1", "t")
+        assert "Outcome: success" not in proc.stdout
+        assert "MaxTurns" in proc.stdout
+
+    def test_command_verifier_pass_allows_done(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        proc = duet("run", "--repo", str(repo), "--verify", "cmd:true", "t")
+        assert "Outcome: success" in proc.stdout
+
+    def test_composite_verify_all_must_pass(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        proc = duet("run", "--repo", str(repo), "--max-turns", "2", "--verify", "cmd:true", "--verify", "cmd:false", "t")
+        assert "Outcome: success" not in proc.stdout
+
+    def test_invalid_verify_spec_rejected(self, duet):
+        proc = duet("run", "--verify", "jest", "t")
+        assert proc.returncode == 1
+        assert "Invalid --verify" in proc.stderr
+
+    def test_budget_halts_and_reports_cost(self, duet):
+        # fake claude reports $0.25/turn; budget $0.30 halts on turn 2's spend
+        proc = duet("run", "--budget-usd", "0.30", "--max-turns", "6", "t", env={"FX_MODE": "loop"})
+        assert "BudgetExceeded($0.30)" in proc.stdout
+        assert "Model cost: $" in proc.stdout
+
+    def test_cost_reported_on_normal_run(self, duet):
+        proc = duet("run", "t")
+        assert "Model cost: $0.25" in proc.stdout  # one claude turn reported
+
+
+class TestPs:
+    def test_ps_lists_run_with_outcome(self, duet, tmp_path):
+        env = {"XDG_STATE_HOME": str(tmp_path / "state")}
+        duet("run", "t", env=env)
+        proc = duet("ps", env=env)
+        assert "success" in proc.stdout
+        assert "Recent duet runs" in proc.stdout
 
 
 class TestLifecycle:

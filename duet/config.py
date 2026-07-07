@@ -7,7 +7,7 @@ import os
 import shutil
 import tomllib
 
-from .adapters import SESSION_ID_PLACEHOLDER, CLIAgent
+from .adapters import DEFAULT_QUOTA_MARKERS, SESSION_ID_PLACEHOLDER, CLIAgent
 
 VALID_PROMPT_VIA = {"stdin", "stdin-sentinel", "arg"}
 VALID_OUTPUT_FORMAT = {"text", "text-last-line", "json"}
@@ -25,6 +25,7 @@ class SessionConfig:
     loop_threshold: float = 0.9
     on_quota: str = "halt"
     quota_wait_seconds: int = 300
+    budget_usd: float = 0.0
 
 
 @dataclass
@@ -57,6 +58,7 @@ def load_config(path: str | Path | None = None) -> DuetConfig:
             loop_threshold=float(session_data.get("loop_threshold", 0.9)),
             on_quota=str(session_data.get("on_quota", "halt")),
             quota_wait_seconds=int(session_data.get("quota_wait_seconds", 300)),
+            budget_usd=float(session_data.get("budget_usd", 0.0)),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"invalid [session] values in {config_path}: {exc}") from exc
@@ -108,6 +110,8 @@ def _build_agent(name: str, item: dict, config_path: Path) -> CLIAgent:
         stdin_sentinel=item.get("stdin_sentinel", "-"),
         resume_command=list(resume_command),
         chain_sessions=bool(item.get("chain_sessions", False)),
+        cost_json_path=item.get("cost_json_path", ""),
+        quota_markers=list(item.get("quota_markers", [])) or list(DEFAULT_QUOTA_MARKERS),
     )
 
 
