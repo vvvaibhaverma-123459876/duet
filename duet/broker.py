@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
-from .adapters import Agent, AgentError
+from .adapters import Agent, AgentError, QuotaError
 from .logging_setup import get_logger
 from .prompting import build_prompt
 from .stopconditions import StopPolicy, strip_control_tokens
@@ -73,20 +73,25 @@ def run_session(
     roles: dict[str, str] | None = None,
     on_turn: Callable[[str], None] | None = None,
     require_all_agents_for_success: bool = True,
+    on_quota: str = "halt",
+    quota_wait_seconds: int = 300,
 ) -> SessionResult:
     if start_with not in agents:
         raise ValueError(f"unknown start agent: {start_with}")
+    if on_quota not in ("halt", "solo", "wait"):
+        raise ValueError(f"on_quota must be halt, solo, or wait, got {on_quota!r}")
     order = list(agents.keys())
     if not order:
         raise ValueError("duet requires at least one available agent")
-    first_index = order.index(start_with)
+    pointer = order.index(start_with)
     transcript = Transcript(task=task, workspace=str(workspace))
     policy = StopPolicy(max_turns, wallclock_seconds, loop_threshold, verifier)
     started_at = time.monotonic()
     partner_last = ""
 
-    for turn in range(max_turns):
-        agent_name = order[(first_index + turn) % len(order)]
+    turn = 0
+    while turn < max_turns:
+        agent_name = order[pointer % len(order)]
         agent = agents[agent_name]
         role = (roles or {}).get(agent_name, f"You are {agent.display_name}. Collaborate constructively and move the task forward.")
         prompt = build_prompt(task, transcript, partner_last, workspace_state(workspace), role)
@@ -94,6 +99,38 @@ def run_session(
             on_turn(f"\n--- Turn {turn + 1}: {agent.display_name} ---")
         try:
             result = agent.send(prompt, workspace)
+        except QuotaError as exc:
+            log.warning("turn %s (%s) quota exhausted: %s", turn + 1, agent_name, exc)
+            if on_quota == "solo" and len(order) > 1:
+                order.remove(agent_name)
+                pointer = pointer % len(order)
+                note = (
+                    f"{agent.display_name} hit its usage limit and was dropped from the rotation; "
+                    f"continuing solo. Its review/verification of later turns is pending."
+                )
+                transcript.note(note)
+                if on_turn:
+                    on_turn(f"[Duet: {note}]")
+                continue
+            if on_quota == "wait":
+                elapsed = time.monotonic() - started_at
+                if elapsed + quota_wait_seconds >= wallclock_seconds:
+                    transcript.outcome = "halted"
+                    transcript.stop_condition = f"QuotaExhausted({agent_name})"
+                    transcript.error = f"{exc} (waiting {quota_wait_seconds}s would exceed the wallclock budget)"
+                    session = Session(task, workspace, transcript, "halted", transcript.stop_condition)
+                    return _result(session, save_artifacts(workspace, transcript))
+                note = f"{agent.display_name} hit its usage limit; waiting {quota_wait_seconds}s before retrying."
+                transcript.note(note)
+                if on_turn:
+                    on_turn(f"[Duet: {note}]")
+                time.sleep(quota_wait_seconds)
+                continue
+            transcript.outcome = "halted"
+            transcript.stop_condition = f"QuotaExhausted({agent_name})"
+            transcript.error = str(exc)
+            session = Session(task, workspace, transcript, "halted", transcript.stop_condition)
+            return _result(session, save_artifacts(workspace, transcript))
         except AgentError as exc:
             log.warning("turn %s (%s) halted: %s", turn + 1, agent_name, exc)
             transcript.outcome = "halted"
@@ -125,6 +162,8 @@ def run_session(
         partner_last = cleaned
         if on_turn:
             on_turn(f"{agent.display_name} ({result.duration_s:.2f}s):\n{cleaned}")
+        turn += 1
+        pointer += 1
         decision = policy.check(
             transcript=transcript,
             current=message,
@@ -132,7 +171,9 @@ def run_session(
             started_at=started_at,
             workspace=workspace,
         )
-        if decision.should_stop and decision.outcome == "success" and require_all_agents_for_success and not _all_agents_spoke(transcript, agents):
+        # Success requires every agent still in the rotation to have spoken;
+        # an agent dropped for quota no longer blocks it.
+        if decision.should_stop and decision.outcome == "success" and require_all_agents_for_success and not _all_agents_spoke(transcript, order):
             if on_turn:
                 on_turn(f"Stop candidate deferred until both agents have contributed: {decision.condition}")
             continue
@@ -148,9 +189,9 @@ def run_session(
     return _result(session, save_artifacts(workspace, transcript))
 
 
-def _all_agents_spoke(transcript: Transcript, agents: dict[str, Agent]) -> bool:
+def _all_agents_spoke(transcript: Transcript, agent_names: list[str]) -> bool:
     spoken = {message.agent for message in transcript.messages}
-    return set(agents).issubset(spoken)
+    return set(agent_names).issubset(spoken)
 
 
 def save_artifacts(workspace: Path, transcript: Transcript, path: Path | None = None) -> tuple[Path, Path]:

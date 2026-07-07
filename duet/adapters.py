@@ -17,6 +17,11 @@ class AgentError(RuntimeError):
     """Raised when an agent CLI cannot produce a usable response."""
 
 
+class QuotaError(AgentError):
+    """The agent CLI failed in a way that looks like an exhausted usage limit
+    or rate limit, so retrying immediately would only burn more quota."""
+
+
 @dataclass(frozen=True)
 class AgentResult:
     text: str
@@ -112,8 +117,12 @@ class CLIAgent:
         text, session_id, warning = self._parse_output(stdout)
         if proc.returncode != 0:
             detail = text or _tail(stderr) or _tail(stdout)
-            reason = " quota/rate-limit suspected." if _looks_like_quota(detail + stderr) else ""
-            raise AgentError(f"{self.name}: exited {proc.returncode}.{reason} Command: {_redacted_cmd(cmd)}. Output: {detail}")
+            if _looks_like_quota(detail + stderr):
+                raise QuotaError(
+                    f"{self.name}: exited {proc.returncode}. quota/rate-limit suspected. "
+                    f"Command: {_redacted_cmd(cmd)}. Output: {detail}"
+                )
+            raise AgentError(f"{self.name}: exited {proc.returncode}. Command: {_redacted_cmd(cmd)}. Output: {detail}")
         if not text.strip():
             raise AgentError(f"{self.name}: produced empty output. Command: {_redacted_cmd(cmd)}. stderr: {_tail(stderr)}")
         if warning:

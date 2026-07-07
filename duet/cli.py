@@ -85,6 +85,13 @@ def main(argv: list[str] | None = None) -> int:
             action="store_true",
             help="carry each agent's CLI session forward between turns instead of stateless spawns",
         )
+        run.add_argument(
+            "--on-quota",
+            choices=["halt", "solo", "wait"],
+            default=None,
+            help="when an agent hits its usage limit: halt cleanly (default), continue solo with the other agent, or wait and retry",
+        )
+        run.add_argument("--quota-wait-seconds", type=int, default=None, help="wait interval for --on-quota wait (default 300)")
 
     sessions = sub.add_parser("sessions", help="list agent CLI sessions available to attach or peek")
     sessions.add_argument("agent", nargs="?", choices=["claude", "codex"], default="claude")
@@ -110,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     connect.add_argument("--max-turns", type=int)
     connect.add_argument("--verify", choices=["pytest", "none"], default="none")
     connect.add_argument("--output-format", choices=["text", "json"], default="text")
+    connect.add_argument("--on-quota", choices=["halt", "solo", "wait"], default=None)
+    connect.add_argument("--quota-wait-seconds", type=int, default=None)
 
     stop = sub.add_parser("stop", help="stop a running duet, claude, or codex session (asks which if ambiguous)")
     stop.add_argument("kind", nargs="?", choices=["duet", "claude", "codex"], help="what to stop (default: ask)")
@@ -268,6 +277,8 @@ def _run_headless(args, config) -> int:
             roles=_roles(start),
             on_turn=print if args.output_format == "text" else None,
             require_all_agents_for_success=len(agents) > 1,
+            on_quota=getattr(args, "on_quota", None) or config.session.on_quota,
+            quota_wait_seconds=getattr(args, "quota_wait_seconds", None) or config.session.quota_wait_seconds,
         )
         if args.output_format == "json":
             print(json.dumps(result.to_dict(), indent=2))
@@ -275,6 +286,8 @@ def _run_headless(args, config) -> int:
             print("\n=== Duet summary ===")
             print(f"Outcome: {result.outcome}")
             print(f"Stop condition: {result.stop_condition}")
+            for note in result.session.transcript.notes:
+                print(f"Note: {note}")
             print(f"Workspace: {workspace}")
             if live:
                 print(f"Branch: {live.branch} (review with `git -C {live.workspace} log {live.branch}` and merge deliberately)")
@@ -348,6 +361,8 @@ def _connect(args, config) -> int:
         output_format=args.output_format,
         attach=attach,
         chain_sessions=True,
+        on_quota=args.on_quota,
+        quota_wait_seconds=args.quota_wait_seconds,
     )
     return _run_headless(run_args, config)
 

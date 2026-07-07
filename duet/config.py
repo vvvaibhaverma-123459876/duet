@@ -23,6 +23,8 @@ class SessionConfig:
     max_turns: int = 6
     wallclock_seconds: int = 900
     loop_threshold: float = 0.9
+    on_quota: str = "halt"
+    quota_wait_seconds: int = 300
 
 
 @dataclass
@@ -53,9 +55,13 @@ def load_config(path: str | Path | None = None) -> DuetConfig:
             max_turns=int(session_data.get("max_turns", 6)),
             wallclock_seconds=int(session_data.get("wallclock_seconds", 900)),
             loop_threshold=float(session_data.get("loop_threshold", 0.9)),
+            on_quota=str(session_data.get("on_quota", "halt")),
+            quota_wait_seconds=int(session_data.get("quota_wait_seconds", 300)),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"invalid [session] values in {config_path}: {exc}") from exc
+    if session.on_quota not in ("halt", "solo", "wait"):
+        raise ConfigError(f"invalid [session] on_quota in {config_path}: must be halt, solo, or wait")
 
     agents = {}
     for name, item in data.get("agents", {}).items():

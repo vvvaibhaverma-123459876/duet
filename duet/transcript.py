@@ -26,9 +26,13 @@ class Transcript:
     stop_condition: str = ""
     workspace: str = ""
     error: str = ""
+    notes: list[str] = field(default_factory=list)
 
     def add(self, message: Message) -> None:
         self.messages.append(message)
+
+    def note(self, text: str) -> None:
+        self.notes.append(text)
 
     def to_dict(self) -> dict:
         return {
@@ -38,6 +42,7 @@ class Transcript:
             "stop_condition": self.stop_condition,
             "workspace": self.workspace,
             "error": self.error,
+            "notes": list(self.notes),
         }
 
     @classmethod
@@ -48,6 +53,7 @@ class Transcript:
             stop_condition=data.get("stop_condition", ""),
             workspace=data.get("workspace", ""),
             error=data.get("error", ""),
+            notes=list(data.get("notes", [])),
         )
         transcript.messages = [Message(**item) for item in data.get("messages", [])]
         return transcript
@@ -66,6 +72,7 @@ class Transcript:
             f"**Outcome:** {self.outcome}",
             f"**Stop condition:** {self.stop_condition or 'none'}",
             f"**Workspace:** `{self.workspace}`",
+            *([""] + [f"> {note}" for note in self.notes] if self.notes else []),
             "",
             "## Task",
             "",

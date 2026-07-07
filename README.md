@@ -174,6 +174,28 @@ lock and its own `duet/session-*` branch, so concurrent sessions on different
 repos (or worktrees of one repo) do not interfere. Duet does not open terminal
 windows for you; run each session in its own terminal or under `tmux`.
 
+## When an agent runs out of usage limit
+
+Quota/rate-limit failures are detected (the CLI's error output is scanned for
+usage-limit signals) and handled per the `--on-quota` policy, configurable in
+`[session]` or per run on `duet run`/`exec`/`connect`:
+
+- **`halt`** (default): stop cleanly. Completed turns are already committed on
+  the duet branch, the transcript is saved, and each agent's session id is
+  printed — when the limit resets, `duet connect` resumes both agents with
+  full context.
+- **`solo`**: drop the exhausted agent from the rotation and let the surviving
+  agent finish alone. The transcript records a note that the partner's
+  review/verification is pending, and success no longer waits for the dropped
+  agent to have spoken.
+- **`wait`**: sleep `--quota-wait-seconds` (default 300) and retry the same
+  agent, as long as the next wait still fits inside the wallclock budget;
+  otherwise halt with the same resumable state as `halt`.
+
+`duet doctor` (run automatically before headless sessions) does an
+authenticated round-trip per agent, so a limit that is already exhausted
+aborts the run before any turns are spent.
+
 ## Controlling sessions individually
 
 `duet talk` continues one agent on its own — no broker, no partner, no branch

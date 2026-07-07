@@ -3,6 +3,10 @@ start_with = "claude"
 max_turns = 6
 wallclock_seconds = 900
 loop_threshold = 0.9
+# When an agent hits its usage/rate limit: "halt" (clean stop, resumable),
+# "solo" (drop it, surviving agent continues), or "wait" (sleep and retry).
+on_quota = "halt"
+quota_wait_seconds = 300
 
 [agents.claude]
 display_name = "Claude"
