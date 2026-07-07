@@ -206,7 +206,7 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
         preexisting_stash = _git_out(["rev-parse", "stash@{0}"], top)
 
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    branch = branch or f"duet/session-{stamp}"
+    branch = branch or _unique_branch(top, f"duet/session-{stamp}")
     _run(["git", "checkout", "-b", branch], top)
     if preexisting_stash:
         # Bring the dirty changes back onto the fresh branch, then drop the
@@ -222,6 +222,21 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
         base_commit=base_commit,
         preexisting_stash=preexisting_stash,
     )
+
+
+def _unique_branch(top: Path, base: str) -> str:
+    """Second-resolution timestamps collide when sessions start back-to-back
+    (CI, resume-right-after-halt); suffix until the name is free."""
+    name = base
+    suffix = 1
+    while subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
+        cwd=top,
+        capture_output=True,
+    ).returncode == 0:
+        suffix += 1
+        name = f"{base}-{suffix}"
+    return name
 
 
 def rollback_live_repo(live: LiveRepo) -> None:

@@ -21,3 +21,20 @@ def test_commit_sets_author(tmp_path):
 
     proc = subprocess.run(["git", "log", "-1", "--format=%an <%ae>"], cwd=workspace, text=True, capture_output=True, check=True)
     assert proc.stdout.strip() == "Claude <claude@duet.local>"
+
+
+def test_back_to_back_live_sessions_get_unique_branches(tmp_path):
+    import subprocess
+    from duet.workspace import prepare_live_repo, release_lock
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "f").write_text("x")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base"], cwd=tmp_path, check=True
+    )
+    first = prepare_live_repo(str(tmp_path))
+    release_lock(first.workspace)
+    second = prepare_live_repo(str(tmp_path))  # same second: must not collide
+    release_lock(second.workspace)
+    assert first.branch != second.branch

@@ -241,8 +241,13 @@ class TestResume:
 
 
 class TestLifecycle:
-    def test_stop_refuses_without_tty_or_yes(self, duet):
-        proc = duet("stop")
+    def test_stop_refuses_without_tty_or_yes(self, duet, tmp_path):
+        # Plant a stoppable target (a live duet lock) so the guard is reached
+        # even on machines with no claude/codex processes running.
+        lock = tmp_path / ".duet" / "session.lock"
+        lock.parent.mkdir()
+        lock.write_text(f"pid={os.getpid()}\ncreated=1\n")
+        proc = duet("stop", "--repo", str(tmp_path))
         assert proc.returncode == 1
         assert "Refusing to stop" in proc.stderr
 
