@@ -296,7 +296,9 @@ def duet(harness, tmp_path):
     state = tmp_path / "state"
     state.mkdir()
 
-    def run(*args: str, env: dict | None = None) -> subprocess.CompletedProcess:
+    def run(
+        *args: str, env: dict | None = None, stdin: str = "", config: Path | None = None
+    ) -> subprocess.CompletedProcess:
         full_env = os.environ.copy()
         full_env["PATH"] = f"{harness['bindir']}:{full_env['PATH']}"
         full_env["ISO_STATE"] = str(state)
@@ -305,7 +307,8 @@ def duet(harness, tmp_path):
         full_env.pop("DUET_COMMIT_MODE", None)
         full_env.update(env or {})
         return subprocess.run(
-            [sys.executable, "-m", "duet", "--config", str(harness["config"]), *args],
+            [sys.executable, "-m", "duet", "--config", str(config or harness["config"]), *args],
+            input=stdin or None,
             text=True,
             capture_output=True,
             timeout=120,
@@ -313,7 +316,19 @@ def duet(harness, tmp_path):
         )
 
     run.state = state
+    run.harness = harness
     return run
+
+
+def config_with(harness, tmp_path: Path, **session_keys: str) -> Path:
+    """A copy of the harness config with extra [session] keys, for testing the
+    config tier of the precedence chain."""
+    original = harness["config"].read_text()
+    extra = "".join(f'{key} = "{value}"\n' for key, value in session_keys.items())
+    patched = original.replace("loop_threshold = 0.9\n", f"loop_threshold = 0.9\n{extra}")
+    path = tmp_path / "patched.toml"
+    path.write_text(patched)
+    return path
 
 
 def authors(repo: Path) -> list[str]:
@@ -420,10 +435,25 @@ class TestIsolateThroughCli:
         assert proc.returncode == 1
         assert "only applies with --repo" in proc.stderr
 
-    def test_scratch_run_unaffected_by_isolate_config_default(self, duet):
-        # No --repo, no flag, no env: from-scratch mode must be untouched.
-        proc = duet("run", "t")
-        assert "Outcome: success" in proc.stdout
+    def test_scratch_run_unaffected_by_isolate_config_default(self, duet, tmp_path):
+        # A project-wide `isolate = "snapshot"` must not make from-scratch runs
+        # fail: config is the weakest tier, and a scratch workspace is already
+        # isolated. Contrast with the flag/env case, which is a hard error.
+        config = config_with(duet.harness, tmp_path, isolate="snapshot")
+        proc = duet("run", "t", config=config)
+        assert "Outcome: success" in proc.stdout, proc.stdout + proc.stderr
+
+    def test_isolate_config_default_still_applies_with_repo(self, duet, tmp_path, source):
+        config = config_with(duet.harness, tmp_path, isolate="snapshot")
+        proc = duet("run", "--repo", str(source), "t", config=config)
+        assert "snapshot of" in proc.stdout, proc.stdout + proc.stderr
+        assert git("branch", "--list", "duet/session-*", cwd=source).strip() == ""
+
+    def test_cli_flag_beats_isolate_config_default(self, duet, tmp_path, source):
+        config = config_with(duet.harness, tmp_path, isolate="snapshot")
+        proc = duet("run", "--repo", str(source), "--isolate", "none", "t", config=config)
+        assert "snapshot of" not in proc.stdout
+        assert git("branch", "--list", "duet/session-*", cwd=source).strip(), "in-place branch missing"
 
     def test_worktree_flag_is_an_alias_for_isolate_worktree(self, duet, source):
         proc = duet("run", "--repo", str(source), "--worktree", "t")
@@ -440,6 +470,40 @@ class TestIsolateThroughCli:
         )
         workspace = Path(_workspace_of(proc.stdout))
         assert git("symbolic-ref", "--short", "HEAD", cwd=workspace) == "fix/cli"
+
+
+class TestReplLaunch:
+    """The REPL launch accepts the same repo/isolation options as `run`."""
+
+    def test_repl_starts_against_a_snapshot_of_the_repo(self, duet, source):
+        head_before, refs_before = git("rev-parse", "HEAD", cwd=source), refs(source)
+        # A non-empty argv with no subcommand lands in the interactive REPL.
+        proc = duet("--repo", str(source), "--isolate", "snapshot", stdin="/quit\n")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "isolate=snapshot" in proc.stdout
+        assert "will not be modified" in proc.stdout
+
+        assert git("rev-parse", "HEAD", cwd=source) == head_before
+        assert refs(source) == refs_before
+
+    def test_repl_workspace_is_the_replica_not_the_source(self, duet, source):
+        proc = duet("--repo", str(source), "--isolate", "snapshot", stdin="/workspace\n/quit\n")
+        workspace = Path(_line_after(proc.stdout, "Repo session: ").split(" (", 1)[0])
+        assert workspace.name == source.name
+        assert workspace.resolve() != source.resolve(), "REPL ran in the source repo"
+        assert "duet-snap-" in str(workspace)
+        assert (workspace / ".git").exists() and (workspace / ".env").exists()
+
+    def test_repl_rejects_isolate_without_repo(self, duet):
+        proc = duet("--isolate", "snapshot", stdin="/quit\n")
+        assert proc.returncode == 1
+        assert "only applies with --repo" in proc.stderr
+
+    def test_repl_carry_brings_untracked_files_into_a_worktree(self, duet, source):
+        proc = duet("--repo", str(source), "--worktree", "--carry", ".env", stdin="/workspace\n/quit\n")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        workspace = Path(_line_after(proc.stdout, "Repo session: ").split(" (", 1)[0])
+        assert (workspace / ".env").read_text() == "SECRET=hunter2\n"
 
 
 def _workspace_of(stdout: str) -> str:
