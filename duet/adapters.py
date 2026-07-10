@@ -61,6 +61,19 @@ class CLIAgent:
     last_session_id: str = ""
     cost_json_path: str = ""
     quota_markers: list[str] = field(default_factory=lambda: list(DEFAULT_QUOTA_MARKERS))
+    extra_env: dict[str, str] = field(default_factory=dict)
+
+    def git_identity_env(self) -> dict[str, str]:
+        """Attribute commits the agent makes itself to the agent, not to whoever
+        happens to own the shell. Set in the subprocess env so the agent cannot
+        forge it from inside its own prompt."""
+        email = f"{self.name}@duet.local"
+        return {
+            "GIT_AUTHOR_NAME": self.display_name,
+            "GIT_AUTHOR_EMAIL": email,
+            "GIT_COMMITTER_NAME": self.display_name,
+            "GIT_COMMITTER_EMAIL": email,
+        }
 
     def build_command(self, prompt: str, workspace: Path) -> tuple[list[str], str | None]:
         template = self.resume_command if self.session_id and self.resume_command else self.command
@@ -92,6 +105,10 @@ class CLIAgent:
     def send(self, prompt: str, workspace: Path) -> AgentResult:
         cmd, stdin_data = self.build_command(prompt, workspace)
         started = time.monotonic()
+        env = None
+        if self.extra_env:
+            env = os.environ.copy()
+            env.update(self.extra_env)
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -100,6 +117,7 @@ class CLIAgent:
                 stderr=subprocess.PIPE,
                 text=True,
                 cwd=workspace,
+                env=env,
                 start_new_session=(os.name != "nt"),
             )
             try:
