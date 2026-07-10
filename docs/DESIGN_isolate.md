@@ -14,10 +14,14 @@ edit freely, where nothing they do can reach the source repo.
 
 ## Chosen semantics: `--isolate {none, worktree, snapshot}`
 
-`--isolate` is only meaningful together with `--repo`. Passing it without `--repo`
-is a hard error rather than a silent no-op: from-scratch sessions already create a
-fresh empty workspace, so every isolation mode would be vacuously true there, and
-accepting the flag would imply a distinction that does not exist.
+`--isolate` is only meaningful together with `--repo`. Passing `--isolate` (or
+`DUET_ISOLATE`) as anything but `none` without `--repo` is a hard error rather than a
+silent no-op: from-scratch sessions already create a fresh empty workspace, so every
+isolation mode would be vacuously true there, and accepting the flag would imply a
+distinction that does not exist. An `isolate` key in `duet.toml` is *ignored* in
+from-scratch mode rather than fatal — a project-wide default must not make
+`duet run "task"` stop working — while a flag or env var set for this one run names a
+specific intent that is worth failing on.
 
 | Mode | Where agents work | History | Untracked files | Source repo |
 | --- | --- | --- | --- | --- |
