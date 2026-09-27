@@ -433,6 +433,9 @@ class Runtime:
             raise ValidationError("run_id is required")
         kind_value = parse_enum(MessageKind, kind, "kind")
         check_text(body, "body", limit=MAX_TEXT)
+        from .hygiene import redact
+
+        body = redact(body)  # untrusted text: no recognisable secret is persisted (D13)
         refs = check_list(artifact_refs, "artifact_refs", limit=32, item_limit=MAX_ID)
         for optional, name in ((task_id, "task_id"), (reply_to, "reply_to"), (correlation_id, "correlation_id"), (causation_id, "causation_id"), (snapshot_ref, "snapshot_ref"), (recipient, "recipient")):
             check_optional_text(optional, name, limit=MAX_ID)

@@ -18,7 +18,8 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | D10 Final review & completion | done | see HANDOFF | baselines (migration 0008), criteria kinds, content authorship, per-file coverage, delta reviews, acknowledgements, check reuse, `duet report` | 8 new tests; suite 857/6 (core), 862/4 (mcp, root and non-root) | Codex review pending | NOT_RUN |
 | D11 Parallel work & recovery | done | see HANDOFF | `code_isolated` tasks, task worktrees (migration 0009), fenced integration, conflict tasks, in-doubt integration settlement | 5 new tests; suite 862/6 (core), 867/4 (mcp, root and non-root) | Codex review pending | NOT_RUN |
 | D12 Native enhancements & coverage | done | see HANDOFF | `duet integrations`, Stop hook, status-line wrapper, `duet capabilities` | 6 new tests; suite 868/6 (core), 873/4 (mcp, root and non-root) | Codex review pending | NOT_RUN (not installed into a real client) |
-| D13–D14 | not started | | | | | |
+| D13 Hardening & compatibility | done | see HANDOFF | `runtime/hygiene.py` (redaction, display sanitising), resolved policy in reports, wheel migration check, macOS CI (non-blocking), SECURITY_MODEL/OPERATIONS/COMPATIBILITY | 20 threat-model/compat tests (7 functions, legacy command parametrised ×13) | Codex review pending | Linux only (CI) |
+| D14 | not started | | | | | |
 
 Independent review: Codex is not installed or authenticated in this
 environment, so no Claude–Codex review has taken place. Every milestone

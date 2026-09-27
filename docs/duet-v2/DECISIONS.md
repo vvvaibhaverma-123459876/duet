@@ -502,3 +502,12 @@ validators. D04 code is unchanged.
   never fails the client.
 - Live push into native sessions is reported as unavailable, not simulated.
   Claude Channels stays off until the user approves a supported setup.
+
+## D-034: Hardening scope and platform claims (D13)
+
+- **Containment is cooperative.** DUET does not sandbox agents or checks. `SECURITY_MODEL.md` says so rather than implying isolation against same-user code.
+- **Secrets.** They are redacted by pattern before persistence (messages and check output), and redaction happens before hashing, so evidence hashes cover what is stored. Exclusion from snapshots (D03) remains the primary control. Redaction is a second line and is documented as incomplete.
+- **Terminal control sequences.** They are stripped at display time (inbox, status, report), not at storage. The stored record stays faithful and every display path is safe.
+- **Final report.** It carries the resolved policy with its hash, so a report can be traced to the exact limits it ran under.
+- **Platforms.** Platforms are claimed only from real CI runs. macOS gets a non-blocking CI job; it is "being measured" until it passes. Windows is unsupported.
+- **Proposed CLI verbs.** `run --engine peer`, `pause`, `explain` and `export` are not added. Existing commands cover them, and adding aliases would widen the legacy surface for no capability.

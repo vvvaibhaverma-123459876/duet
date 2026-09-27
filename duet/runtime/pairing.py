@@ -82,6 +82,7 @@ from .contracts import (
 from .identity import ProcessIdentity, hash_token
 from .paths import ensure_private_dir
 from .policy import AuthorisationPolicy
+from .hygiene import for_display
 from .taskplan import ISOLATED_KINDS, WRITE_KINDS
 
 log = logging.getLogger("duet.pairing")
@@ -1512,7 +1513,7 @@ def _message_view(message: dict) -> dict:
         "task_id": message["task_id"],
         "snapshot_id": message["snapshot_ref"],
         "state": message["state"],
-        "body": message["body"],
+        "body": for_display(message["body"]),  # no terminal control sequences reach a model or a screen (D13)
     }
 
 

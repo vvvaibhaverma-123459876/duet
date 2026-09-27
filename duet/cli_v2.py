@@ -368,7 +368,9 @@ def _run_status(args) -> int:
         status = _controller(paths).call("run_status", run_id=args.run)
     else:
         status = _local_coordinator(paths).run_status(args.run)
-    print(json.dumps(status, indent=2) if args.json else format_status(status))
+    from .runtime.hygiene import for_display
+
+    print(json.dumps(status, indent=2) if args.json else for_display(format_status(status)))
     return 0
 
 

@@ -8,6 +8,8 @@ environment: provider API keys, tokens and other secrets in Duet's own
 environment are not passed through unless the user named them."""
 from __future__ import annotations
 
+from ..runtime.hygiene import redact
+
 import hashlib
 import os
 import re
@@ -95,7 +97,8 @@ def run_check(
         ended = utc_now()
         return _outcome(spec, "unknown", None, f"could not execute: {exc}", fingerprint, before.tree_hash, before.tree_hash, "check could not be executed", started, ended)
     ended = utc_now()
-    output = (proc.stdout + ("\n" if proc.stdout and proc.stderr else "") + proc.stderr).strip()
+    # Redacted before it is hashed and stored: evidence never keeps a secret (D13).
+    output = redact((proc.stdout + ("\n" if proc.stdout and proc.stderr else "") + proc.stderr).strip())
     after = capture_snapshot(root, untracked=untracked)
     if proc.timed_out:
         status, detail = "failed", f"timed out after {spec.timeout_seconds}s (treated as failing)"

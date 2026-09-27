@@ -47,7 +47,9 @@ def test_wheel_contains_packaged_defaults(tmp_path):
     wheel = _build_wheel(tmp_path)
     names = zipfile.ZipFile(wheel).namelist()
     assert "duet/resources/default_config.toml" in names
-    for migration in ("0001_initial.sql", "0002_evidence.sql", "0003_pairing.sql"):
+    packaged = sorted(p.name for p in (Path(__file__).resolve().parents[1] / "duet" / "runtime" / "migrations").glob("*.sql"))
+    assert len(packaged) >= 9  # every migration through D11, and any later one
+    for migration in packaged:
         assert f"duet/runtime/migrations/{migration}" in names
     # D05: packaged participant instructions and the Claude Code skill.
     assert "duet/resources/instructions/participant.md" in names

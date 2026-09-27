@@ -40,7 +40,7 @@ compatibility.
 | R12 | Recoverability | D02, D11 | TESTED_SIM (atomic transactions; IN_DOUBT never re-dispatched; in-doubt turns and integrations settled from evidence at start); chaos harness: not built |
 | R13 | No silent paid fallback | D04, D08 | TESTED_SIM (no `--bare`, no API-key paths, billing errors never retried as quota; admission only admits, defers or pauses the same provider; quota pauses wait for the reset; an unenforceable cap pauses before paid work) |
 | R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2: TESTED_SIM (quota or budget pressure defers optional work and pauses; the review and checks stay required) |
-| R15 | Compatibility | D01, D13 | LEGACY_PARTIAL (documented outcome/exit-code change D-002; v1 transcript migration) |
+| R15 | Compatibility | D01, D13 | TESTED_SIM: legacy commands keep their interface (`test_legacy_commands_keep_their_interface`); documented outcome/exit-code change D-002; v1 transcript migration; tiers in COMPATIBILITY.md (Linux CI; macOS job non-blocking, pending evidence) |
 
 ## Acceptance tests
 
@@ -72,23 +72,23 @@ compatibility.
 | AT24 | Agent edits acceptance policy | D03/D10 | `test_a_new_contract_version_voids_earlier_evidence` | TESTED_SIM |
 | AT25 | Joint authorship reviews | D10 | `test_joint_work_needs_per_file_review_and_both_acknowledgements` | TESTED_SIM |
 | AT26 | Dirty active checkout | D03 | `test_user_checkout_is_untouched`, `test_import_inputs_is_explicit_and_checked` | TESTED_SIM |
-| AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | `test_inputs_exclude_ignored_sensitive_and_escaping_links`, `test_import_inputs_is_explicit_and_checked`, `test_sensitive_classifier` | TESTED_SIM (D03); threat-model pass: D13 |
+| AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | `test_inputs_exclude_ignored_sensitive_and_escaping_links`, `test_import_inputs_is_explicit_and_checked`, `test_sensitive_classifier` | TESTED_SIM (D03); D13 adds redaction of secrets in messages and check output (`test_known_secret_formats_are_redacted`, `test_check_output_is_redacted_before_it_is_hashed_and_stored`) |
 | AT28 | Concurrent writers | D11 | `test_two_agents_write_at_once_in_separate_checkouts` | TESTED_SIM |
 | AT29 | Crash around dispatch | D02/D11 | `test_an_integration_done_before_a_crash_is_not_repeated`, `test_in_doubt_is_never_redispatched` | TESTED_SIM |
 | AT30 | Crash during commit/integration | D11 | `test_an_integration_lost_before_it_wrote_is_redone_from_evidence`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (no chaos harness) |
 | AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex), `test_cancel_while_waiting` (pair wait wakes with CANCELLED) | TESTED_SIM (waiting, working); verifying across a crash: D11 |
 | AT32 | PID reuse / unrelated sessions | D11 | `test_stopping_duet_leaves_unrelated_sessions_alone` | TESTED_SIM |
-| AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval`, `test_message_text_carries_no_authority`, `test_authentication_rules` (identity never a parameter) | TESTED_SIM (runtime + service); installer threat model: D13 |
+| AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval`, `test_message_text_carries_no_authority`, `test_authentication_rules` (identity never a parameter) | TESTED_SIM (runtime + service + `test_peer_text_cannot_grant_authority`); display sanitising `test_control_sequences_never_reach_a_screen` |
 | AT34 | Malformed/flooded provider output | D04 | legacy `test_process.py`; v2 `test_flood_is_bounded`, `test_stream_process_truncates_long_lines`, malformed-line and server-death tests | TESTED_SIM |
 | AT35 | Unknown/failed/skipped required check | D03/D10 | `test_unknown_or_missing_required_check_blocks`, `test_no_tests_is_not_a_pass`, `test_contract_without_checks_can_never_verify` | TESTED_SIM |
 | AT36 | Inputs mutate during verification | D03 | `test_mutation_during_check_invalidates`, `test_transient_caches_do_not_invalidate` | TESTED_SIM |
-| AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
-| AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, migrations 0001–0003, participant instructions, Claude skill) | TESTED_SIM |
+| AT37 | Legacy transcript/config migration | D01/D13 | `test_v1_transcript_zero_cost_migrates_to_unknown`, `test_legacy_commands_keep_their_interface`; legacy `budget_usd` is never a v2 allowance (COMPATIBILITY.md) | TESTED_SIM |
+| AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, every packaged migration (0001–0009), participant instructions, Claude skill) | TESTED_SIM |
 | AT39 | Integration install/uninstall | D12/D13 | `test_setup_is_planned_approved_and_reversible`, `test_uninstall_leaves_what_the_user_changed_and_what_it_did_not_own` | TESTED_SIM (fake CLIs) |
 | AT40 | Quota reset with stale telemetry | D08/D11 | `test_quota_holds_probe_once_and_release`, `test_a_passive_quota_read_ends_the_pause_without_a_probe` | TESTED_SIM (D08 part); crash matrix: D11 |
 | AT41 | Mid-turn setting change unsupported | D04/D09 | `test_native_sessions_get_advice`, `test_profile_requests_raise_managed_and_advise_native` | TESTED_SIM |
 | AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |
-| AT43 | No sandbox for borrowed session | D13 | | NOT_STARTED |
+| AT43 | No sandbox for borrowed session | D12/D13 | `duet capabilities` reports native sessions as advisory coverage, not sandboxed; SECURITY_MODEL.md states cooperative containment only | DOCUMENTED + TESTED_SIM (capabilities output) |
 | AT44 | Same snapshot checked twice | D10 | `test_an_identical_snapshot_reuses_its_evidence` | TESTED_SIM |
 | AT45 | Native subagents spawn | D11 | | NOT_STARTED |
 | AT46 | Estimate overshoot before final usage | D08/D11 | `test_overshoot_is_recorded_not_hidden`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (D08 part); crash matrix: D11 |

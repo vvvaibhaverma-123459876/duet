@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 from ..verification.acceptance import AcceptanceContract
 from .contracts import CONTROLLER
+from .hygiene import for_display
 
 if TYPE_CHECKING:
     from .pairing import PairCoordinator
@@ -61,6 +62,7 @@ def build(co: "PairCoordinator", run_id: str) -> dict:
         ],
         "admission": {"holds": status["admission"]["holds"], "finishing": status["admission"].get("finishing", [])},
         "limitations": list(LIMITATIONS),
+        "policy": _policy(co, run_id),
     }
     if report["repository"]["deliverable_commit"] == settings.base_sha:
         report["repository"]["deliverable_commit"] = None
@@ -111,12 +113,24 @@ def build(co: "PairCoordinator", run_id: str) -> dict:
     return report
 
 
+def _policy(co: "PairCoordinator", run_id: str) -> dict:
+    """The resolved authorisation policy of the run and its hash (no secrets live in it)."""
+    row = co.runtime.store.read().get("runs", run_id)
+    policy = co.runtime.policy_for(run_id)
+    body = policy.to_dict() if hasattr(policy, "to_dict") else dict(policy.__dict__)
+    return {"hash": row["policy_hash"] if row is not None and "policy_hash" in row.keys() else None, "resolved": body}
+
+
 def _branch_head(settings) -> str | None:
     proc = subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{settings.branch}"], cwd=settings.repo_path, capture_output=True, text=True)
     return (proc.stdout.strip() or None) if proc.returncode == 0 else None
 
 
 def render_markdown(report: dict) -> str:
+    return for_display(_render(report))
+
+
+def _render(report: dict) -> str:
     lines = [f"# DUET final report: {report['run_id']}", "", f"**Outcome: {report['outcome']}** ({report['collaboration']})", "",
              f"Objective: {report['objective']}", ""]
     repo = report["repository"]

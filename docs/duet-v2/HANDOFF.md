@@ -4,7 +4,7 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D12** (native integrations and coverage; see `D12_REPORT.md`). Before that **D11** (parallel work and recovery). Before that **D10** (final review and completion). Before that D09 (routing) and **D08** (see `D01_REPORT.md` to `D08_REPORT.md`). D06 is `619ca53`, the core review fixes are `e71d957`, the D07 ledger is `2b390ea`, and D07's persistence is `5814b11`. D08 is the commit that adds `docs/duet-v2/D08_REPORT.md`.
+- Last completed milestone: **D13** (hardening; see `SECURITY_MODEL.md`, `OPERATIONS.md`, `COMPATIBILITY.md`). Before that **D12** (native integrations and coverage). Before that **D11** (parallel work and recovery). Before that **D10** (final review and completion). Before that D09 (routing) and **D08** (see `D01_REPORT.md` to `D08_REPORT.md`). D06 is `619ca53`, the core review fixes are `e71d957`, the D07 ledger is `2b390ea`, and D07's persistence is `5814b11`. D08 is the commit that adds `docs/duet-v2/D08_REPORT.md`.
 - Changed in D08: `duet/usage/{estimation,admission,reservations}.py`, `duet/runtime/budgeting.py`, migration `0006_admission.sql`, and `duet/runtime/{api,pools,reducer,peers,pairing,service}.py`, `duet/cli.py`, `duet/cli_v2.py`. Tests: `tests/usage/test_admission.py`, `tests/runtime/test_finishing_reserves.py`, `tests/integrations/test_admission_service.py`; one service test was rewritten for D08 semantics.
 - `feat/isolate-modes` is merged in (`9db29f3`).
 - Suite after D12: core 868 passed/6 skipped; mcp 873/4 (root and non-root). After D11: 862/6 and 867/4. After D10: 857/6 and 862/4. After D09: 849/6 and 854/4. Earlier, after D08 plus the merged D06 review fixes (`fix-d06-review`, `6a9f5bd`) and the process/umask hardening, all on the final tree:
@@ -27,7 +27,7 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-1. D13: CLI compatibility, packaging, portability and operational hardening (versioned typed config with precedence and legacy migration with dry-run/backup/rollback; packaged-wheel checks; redaction and bounded logs; stable exit codes; secret/escaping-symlink policy evidence).
+1. D14: evaluation and release gates: ACCEPTANCE_RESULTS.md (every AT with evidence or explicit restriction), EVALUATION.md (only measured results; real-provider comparisons need a person with both CLIs), RELEASE_CHECKLIST.md, final handoff. Check the macOS CI job result and record it in COMPATIBILITY.md.
 2. A person with both CLIs logged in runs `PEER_ALPHA_TEST.md` (AT01–AT03).
 
 ## Uncommitted files

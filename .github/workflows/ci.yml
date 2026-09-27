@@ -41,3 +41,18 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           id -u
           pytest -q
+
+  test-macos:
+    # Evidence for COMPATIBILITY.md: macOS is not claimed as supported until
+    # this job passes. It must not block the PR while the tier is unproven.
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install (with the optional MCP SDK)
+        run: pip install -e ".[test,mcp]"
+      - name: Suite on macOS
+        run: pytest -q
