@@ -19,11 +19,14 @@ from dataclasses import dataclass, field
 
 from .contracts import MAX_TEXT, ValidationError, check_list, check_text
 
-TASK_KINDS = ("code", "investigate", "test_design", "review")
-# Tasks that change files need the run's single writer (one writer per
-# workspace until D11). The other kinds produce findings or plans and can be
-# owned by either participant.
+TASK_KINDS = ("code", "investigate", "test_design", "review", "code_isolated")
+# Tasks that change the run's workspace need its single writer. The other
+# kinds produce findings or plans and can be owned by either participant.
 WRITE_KINDS = frozenset({"code"})
+# D11: independent code work done in its own worktree by the participant who
+# is not the writer; its accepted result is integrated into the run's
+# workspace by the writer (the integration owner), under the writer's fence.
+ISOLATED_KINDS = frozenset({"code_isolated"})
 
 MAX_PLAN_TASKS = 12
 MAX_TASKS_PER_RUN = 32

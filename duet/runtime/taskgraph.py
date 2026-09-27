@@ -50,6 +50,7 @@ from .taskplan import (
     ACTIVE,
     MAX_ACTIVE_CLAIMS,
     MAX_TASKS_PER_RUN,
+    ISOLATED_KINDS,
     WRITE_KINDS,
     FailureRecord,
     GraphState,
@@ -281,6 +282,8 @@ class TaskGraph:
         writer = self.co._writer_id(run_id)
         if task["kind"] in WRITE_KINDS and writer != principal.id:
             raise PolicyDenied("this task changes files and the run has one writer: your peer. Take a non-code task or review instead")
+        if task["kind"] in ISOLATED_KINDS and writer == principal.id:
+            raise PolicyDenied("isolated code tasks are for your peer, in a worktree of their own; you integrate the result when you accept it")
         if task["state"] == TaskState.CHANGES_REQUESTED.value and task["owner"] not in (None, principal.id):
             if not (task["kind"] in WRITE_KINDS and writer == principal.id):
                 raise PolicyDenied("changes were requested from the task's owner; it is theirs to fix")
@@ -308,7 +311,11 @@ class TaskGraph:
         if task["state"] != TaskState.RUNNING.value:
             raise InvalidTransition(f"task {task_id} is {task['state']}; claim it before completing it")
         snapshot_id = None
-        if task["kind"] in WRITE_KINDS:
+        if task["kind"] in ISOLATED_KINDS:
+            row = self.co.parallel.capture(principal, task)
+            snapshot_id = row["snapshot_id"]
+            self.credit_code(run_id, principal.id, row)
+        elif task["kind"] in WRITE_KINDS:
             from ..workspaces.snapshots import capture_snapshot
 
             ws = self.co.workspace(run_id)
@@ -359,6 +366,10 @@ class TaskGraph:
             (run_id, task_id, principal.id, *OPEN_REQUEST_STATES),
         ):
             self.rt.mark_handled(principal, message["message_id"])
+        integration = None
+        if decision == "accept" and task["kind"] in ISOLATED_KINDS:
+            # The writer accepts, and integrates, inside this call (D11).
+            integration = self.co.parallel.integrate(principal, task)
         fresh = self.co._task(task_id, run_id)
         if decision == "accept":
             self.rt.transition_task(CONTROLLER, task_id, TaskState.VERIFIED, expected_version=fresh["state_version"], reason=f"accepted by {principal.provider}: {reason}"[:500])
@@ -375,7 +386,10 @@ class TaskGraph:
         self.co.notify()
         self.observe(run_id, "review")
         self.nudge(run_id)
-        return {"task_id": task_id, "decision": decision, "state": self.co._task(task_id, run_id)["state"]}
+        out = {"task_id": task_id, "decision": decision, "state": self.co._task(task_id, run_id)["state"]}
+        if integration is not None:
+            out["integration"] = integration
+        return out
 
     # ------------------------------------------------------------------ roles
 

@@ -473,3 +473,18 @@ validators. D04 code is unchanged.
   environment fingerprint.
 - The final report (`duet.final-report/1`) is deterministic: built from
   records, with every missing obligation and its next action.
+
+## D-032: Selective parallel implementation (D11)
+
+- One run workspace, one writer. Independent code work is a
+  `code_isolated` task for the other participant, in its own worktree
+  (branch `<run branch>-task-<id>`, from the base commit) under its own
+  lease.
+- The writer is the only integration owner. Accepting an isolated result
+  applies its patch inside that call, after checking the writer's fence, as
+  an `integration` action. The patch is checked before anything is written.
+  A conflict writes nothing and becomes a `code` task with the patch as
+  evidence.
+- An integration in doubt after a crash is settled from the workspace
+  contents (reverse-applies, applies, or neither). A second application
+  happens only when the files prove the first did not.

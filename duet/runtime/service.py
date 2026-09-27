@@ -305,6 +305,7 @@ class RuntimeService:
         report = self.runtime.reconcile(CONTROLLER)
         self._settle_in_doubt_checks(report["in_doubt"])
         self.coordinator.budget.settle_in_doubt_turns(report["in_doubt"])
+        self.coordinator.parallel.settle_in_doubt(report["in_doubt"])
         # Managed sessions do not survive their service: their drivers are
         # gone, so they must not keep looking connected.
         self._release_orphaned_managed_peers("the DUET service restarted; managed sessions are not relaunched automatically")

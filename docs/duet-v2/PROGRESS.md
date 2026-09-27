@@ -16,7 +16,8 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | D08 Completion-aware admission | done | see HANDOFF | `duet/usage/{estimation,admission,reservations}.py`, `runtime/budgeting.py`, migration 0006, admitted managed turns, quota pause/resume, `duet resume --run` | 19 pure + 11 store + 7 service tests; suite 817/6 (core), 822/4 (mcp, root and non-root) | Codex review pending | NOT_RUN (no real quota exhaustion observed) |
 | D09 Adaptive routing | done | see HANDOFF | `duet/routing`, `runtime/routing_control.py`, migration 0007, routed managed turns, `duet_request_profile`, `duet routing` | 26 policy + 6 service tests; suite 849/6 (core), 854/4 (mcp, root and non-root) | Codex review pending | NOT_RUN |
 | D10 Final review & completion | done | see HANDOFF | baselines (migration 0008), criteria kinds, content authorship, per-file coverage, delta reviews, acknowledgements, check reuse, `duet report` | 8 new tests; suite 857/6 (core), 862/4 (mcp, root and non-root) | Codex review pending | NOT_RUN |
-| D11–D14 | not started | | | | | |
+| D11 Parallel work & recovery | done | see HANDOFF | `code_isolated` tasks, task worktrees (migration 0009), fenced integration, conflict tasks, in-doubt integration settlement | 5 new tests; suite 862/6 (core), 867/4 (mcp, root and non-root) | Codex review pending | NOT_RUN |
+| D12–D14 | not started | | | | | |
 
 Independent review: Codex is not installed or authenticated in this
 environment, so no Claude–Codex review has taken place. Every milestone

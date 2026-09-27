@@ -22,6 +22,7 @@ from .taskplan import (
     MAX_PLAN_TASKS,
     MAX_TASKS_PER_RUN,
     TASK_KINDS,
+    ISOLATED_KINDS,
     WRITE_KINDS,
     FailureRecord,
     GraphState,
@@ -323,6 +324,8 @@ def _completed_count(state: GraphState, participant_id: str) -> int:
 def _eligible(person: ParticipantView, task: GraphTask) -> bool:
     if task.kind in WRITE_KINDS and not person.is_writer:
         return False
+    if task.kind in ISOLATED_KINDS and person.is_writer:
+        return False  # isolated work is the non-writer's; the writer integrates it
     if task.owner is not None and task.owner != person.participant_id:
         return False
     return True
@@ -481,6 +484,8 @@ def _wait_reason(state: GraphState, me: ParticipantView) -> str:
             other.append(f"{tid} awaits acceptance")
         elif tid in ready and task.kind in WRITE_KINDS and not me.is_writer:
             other.append(f"{tid} is {task.kind} work for the writer")
+        elif tid in ready and task.kind in ISOLATED_KINDS and me.is_writer:
+            other.append(f"{tid} is isolated code work for your peer; you integrate it when you accept it")
         elif tid in ready and task.owner is not None and task.owner != me.participant_id:
             other.append(f"{tid} is {task.owner}'s to repair{owner_note}")
         elif tid in suggested and suggested[tid] != me.participant_id:

@@ -38,6 +38,7 @@ from duet.runtime.taskplan import (
     MAX_DELEGATION_DEPTH,
     MAX_PLAN_TASKS,
     MAX_TASKS_PER_RUN,
+    ISOLATED_KINDS,
     TASK_KINDS,
     WRITE_KINDS,
     FailureRecord,
@@ -526,6 +527,16 @@ def test_loop_policy_is_validated(kwargs):
 # --- Simulation harness -------------------------------------------------------------------------
 
 
+
+def can_work(is_writer: bool, kind: str) -> bool:
+    """Who may do a task: code in the run's workspace is the writer's,
+    isolated code (D11) the other participant's, the rest anyone's."""
+    if kind in WRITE_KINDS:
+        return is_writer
+    if kind in ISOLATED_KINDS:
+        return not is_writer
+    return True
+
 class PairSim:
     MAX_REPAIRS = 2
     MAX_IDLE = 4
@@ -625,7 +636,7 @@ class PairSim:
         assert t.state in CLAIMABLE, f"claim of a {t.state} task"
         assert t.owner in (None, pid), "claim of another participant's task"
         assert all(self.tasks[d].state == DONE for d in t.depends_on), "claim with unmet dependencies"
-        assert self.participants[pid].is_writer or t.kind not in WRITE_KINDS, "code claimed by a non-writer"
+        assert can_work(self.participants[pid].is_writer, t.kind), "code claimed by the wrong participant"
         assert self.active(pid) < MAX_ACTIVE_CLAIMS, "claim beyond the active limit"
         self.move(rec.task_id, "CLAIMED", owner=pid)
         self.sample("turn")
@@ -672,7 +683,7 @@ class PairSim:
                     continue
                 t = state.tasks[r.task_id]
                 assert t.owner in (None, pid), "(a) advised to take another participant's task"
-                assert me.is_writer or t.kind not in WRITE_KINDS, "(d) code advised to a non-writer"
+                assert can_work(me.is_writer, t.kind), "(d) code advised to the wrong participant"
                 assert holders.setdefault(r.task_id, pid) == pid, "(a) one task advised to both participants"
         for t in state.tasks.values():
             if t.state in ACTIVE:
@@ -743,6 +754,8 @@ def test_sim_both_participants_contribute_without_duplication():
     for task_id, owner in sim.completed_by.items():
         if sim.tasks[task_id].kind in WRITE_KINDS:
             assert owner == "claude"
+        if sim.tasks[task_id].kind in ISOLATED_KINDS:
+            assert owner != "claude"
     # (a) every task was worked by exactly one participant.
     assert len(sim.completed_by) == len(sim.tasks)
     assert sim.attempts[sim.id_of("impl")] == 2 and sim.replans == 0
@@ -938,7 +951,7 @@ def random_state(rng: random.Random) -> GraphState:
         state = rng.choice(STATES)
         owner = None
         if state in ACTIVE or state in ("REVIEW_REQUIRED", "CHANGES_REQUESTED", "VERIFIED"):
-            owner = "claude" if s.kind in WRITE_KINDS else rng.choice(["claude", "codex"])
+            owner = "claude" if s.kind in WRITE_KINDS else ("codex" if s.kind in ISOLATED_KINDS else rng.choice(["claude", "codex"]))
         tasks.append(GraphTask(
             task_id=ids[s.key], kind=s.kind, state=state, owner=owner, required=rng.random() < 0.7,
             depends_on=tuple(ids[d] for d in s.depends_on), parent_id=ids.get(s.parent), order=rng.randint(0, 3),
@@ -978,7 +991,7 @@ def test_random_states_keep_every_scheduler_invariant():
             active = sum(1 for x in state.tasks.values() if x.owner == pid and x.state in ACTIVE)
             eligible = [
                 r for r in ready
-                if (me.is_writer or state.tasks[r].kind not in WRITE_KINDS) and state.tasks[r].owner in (None, pid)
+                if can_work(me.is_writer, state.tasks[r].kind) and state.tasks[r].owner in (None, pid)
             ]
             options[pid] = eligible if active < MAX_ACTIVE_CLAIMS else []
             if t is not None:
@@ -999,7 +1012,7 @@ def test_random_states_keep_every_scheduler_invariant():
             for r in recs:
                 if r.task_id is not None:
                     assert state.tasks[r.task_id].owner in (None, pid)
-                    assert me.is_writer or state.tasks[r.task_id].kind not in WRITE_KINDS
+                    assert can_work(me.is_writer, state.tasks[r.task_id].kind)
                 if r.action == "claim":
                     assert r.task_id == plan.get(pid) or state.tasks[r.task_id].owner == pid
                     assert 60 < r.priority < 80

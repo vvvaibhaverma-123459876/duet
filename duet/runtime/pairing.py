@@ -82,7 +82,7 @@ from .contracts import (
 from .identity import ProcessIdentity, hash_token
 from .paths import ensure_private_dir
 from .policy import AuthorisationPolicy
-from .taskplan import WRITE_KINDS
+from .taskplan import ISOLATED_KINDS, WRITE_KINDS
 
 log = logging.getLogger("duet.pairing")
 
@@ -199,12 +199,14 @@ class PairCoordinator:
         self._checks_running: dict[str, threading.Thread] = {}  # checks still executing
         self._check_threads: dict[str, threading.Thread] = {}  # including their follow-up
         from .budgeting import Budgeting
+        from .parallel import ParallelWork
         from .routing_control import RoutingControl
         from .taskgraph import TaskGraph
 
         self.graph = TaskGraph(self)
         self.budget = Budgeting(self)
         self.routing = RoutingControl(self)
+        self.parallel = ParallelWork(self)
 
     # ------------------------------------------------------------------ notification
 
@@ -555,6 +557,7 @@ class PairCoordinator:
             "verification": verification,
             "admission": self.budget.status(run_id),
             "routing": self.routing.status(run_id),
+            "isolated_workspaces": self.parallel.status(run_id),
             "profile": "routed per turn by task risk (D09): enforced for managed sessions, advice for native ones",
             "control_coverage": (
                 "DUET bounds the turns, checks and messages it schedules. Work a native session does outside these "
@@ -762,7 +765,14 @@ class PairCoordinator:
         self.notify()
         settings = self.settings(run_id)
         view = {"task": _task_view(claimed), "kind": claimed["kind"]}
-        if claimed["kind"] in WRITE_KINDS:
+        if claimed["kind"] in ISOLATED_KINDS:
+            own = self.parallel.ensure(principal, claimed)
+            view.update(
+                workspace=str(own.path), branch=own.branch, base_sha=own.base_sha,
+                rules=(f"Edit files only under {own.path}: a worktree of your own for this task, based on the run's base commit. "
+                       "Call duet_complete_task when it is done; your peer, the writer, integrates it into the run's workspace when accepting."),
+            )
+        elif claimed["kind"] in WRITE_KINDS:
             view.update(
                 workspace=settings.workspace_path, base_sha=settings.base_sha, branch=settings.branch,
                 rules=(

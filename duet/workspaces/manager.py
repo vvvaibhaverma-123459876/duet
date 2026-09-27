@@ -58,14 +58,14 @@ class WorkspaceManager:
         self.runtime = runtime
         self.root = ensure_private_dir(Path(root) if root else runtime_dir() / "worktrees")
 
-    def create(self, run_id: str, repo_path: str | Path, *, base: str = "HEAD", branch: str | None = None) -> StrictWorkspace:
+    def create(self, run_id: str, repo_path: str | Path, *, base: str = "HEAD", branch: str | None = None, subdir: str | None = None) -> StrictWorkspace:
         repo = resolve_repo(repo_path)
         assert_safe_live_repo(repo.toplevel)
         base_sha = _git(["rev-parse", "--verify", f"{base}^{{commit}}"], repo.toplevel)
         name = branch or _unique_branch(repo.toplevel, f"duet/run-{run_id.removeprefix('run_')[:12]}")
         if _git_ok(["rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], repo.toplevel):
             raise ValidationError(f"branch {name} already exists; Duet never reuses or resets an existing branch")
-        dest = self.root / run_id / (repo.toplevel.name or "repo")
+        dest = self.root / run_id / (subdir or repo.toplevel.name or "repo")
         if dest.exists():
             raise ValidationError(f"workspace path already exists: {dest}")
         dest.parent.mkdir(parents=True, exist_ok=True)

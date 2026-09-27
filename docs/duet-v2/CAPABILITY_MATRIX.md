@@ -36,8 +36,8 @@ compatibility.
 | R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery; requested/accepted/observed recorded per routed turn, differences flagged; refused settings excluded with evidence; native sessions advisory) |
 | R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM (predicate with criteria demonstrated by fail-to-pass or explicit review; per-file non-author coverage; deterministic final report) |
 | R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; delta reviews need a recorded basis; reuse by fingerprint) |
-| R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree leaves the user checkout byte-identical; one fenced writer; explicit checked imports); integration locking: D11 |
-| R12 | Recoverability | D02, D11 | TESTED_SIM (runtime: atomic transactions, IN_DOUBT reconciliation, no blind re-dispatch); full crash matrix: D11 |
+| R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree; one fenced writer; isolated task worktrees with their own leases; fenced integration by the writer; conflicts write nothing) |
+| R12 | Recoverability | D02, D11 | TESTED_SIM (atomic transactions; IN_DOUBT never re-dispatched; in-doubt turns and integrations settled from evidence at start); chaos harness: not built |
 | R13 | No silent paid fallback | D04, D08 | TESTED_SIM (no `--bare`, no API-key paths, billing errors never retried as quota; admission only admits, defers or pauses the same provider; quota pauses wait for the reset; an unenforceable cap pauses before paid work) |
 | R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2: TESTED_SIM (quota or budget pressure defers optional work and pauses; the review and checks stay required) |
 | R15 | Compatibility | D01, D13 | LEGACY_PARTIAL (documented outcome/exit-code change D-002; v1 transcript migration) |
@@ -73,11 +73,11 @@ compatibility.
 | AT25 | Joint authorship reviews | D10 | `test_joint_work_needs_per_file_review_and_both_acknowledgements` | TESTED_SIM |
 | AT26 | Dirty active checkout | D03 | `test_user_checkout_is_untouched`, `test_import_inputs_is_explicit_and_checked` | TESTED_SIM |
 | AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | `test_inputs_exclude_ignored_sensitive_and_escaping_links`, `test_import_inputs_is_explicit_and_checked`, `test_sensitive_classifier` | TESTED_SIM (D03); threat-model pass: D13 |
-| AT28 | Concurrent writers | D11 | | NOT_STARTED |
-| AT29 | Crash around dispatch | D02/D11 | `test_crash_mid_transaction_leaves_no_partial_state`, `test_in_doubt_is_never_redispatched`, `test_reconcile_uses_process_identity_not_just_expiry` | TESTED_SIM (runtime); provider-level: D11 |
-| AT30 | Crash during commit/integration | D11 | | NOT_STARTED |
+| AT28 | Concurrent writers | D11 | `test_two_agents_write_at_once_in_separate_checkouts` | TESTED_SIM |
+| AT29 | Crash around dispatch | D02/D11 | `test_an_integration_done_before_a_crash_is_not_repeated`, `test_in_doubt_is_never_redispatched` | TESTED_SIM |
+| AT30 | Crash during commit/integration | D11 | `test_an_integration_lost_before_it_wrote_is_redone_from_evidence`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (no chaos harness) |
 | AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex), `test_cancel_while_waiting` (pair wait wakes with CANCELLED) | TESTED_SIM (waiting, working); verifying across a crash: D11 |
-| AT32 | PID reuse / unrelated sessions | D11 | | LEGACY_PARTIAL (`stop` confirms; name matching) |
+| AT32 | PID reuse / unrelated sessions | D11 | `test_stopping_duet_leaves_unrelated_sessions_alone` | TESTED_SIM |
 | AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval`, `test_message_text_carries_no_authority`, `test_authentication_rules` (identity never a parameter) | TESTED_SIM (runtime + service); installer threat model: D13 |
 | AT34 | Malformed/flooded provider output | D04 | legacy `test_process.py`; v2 `test_flood_is_bounded`, `test_stream_process_truncates_long_lines`, malformed-line and server-death tests | TESTED_SIM |
 | AT35 | Unknown/failed/skipped required check | D03/D10 | `test_unknown_or_missing_required_check_blocks`, `test_no_tests_is_not_a_pass`, `test_contract_without_checks_can_never_verify` | TESTED_SIM |

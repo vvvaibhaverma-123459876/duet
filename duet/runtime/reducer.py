@@ -175,6 +175,11 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "routing_pins": ("provider", ("provider", "model", "effort", "min_profile", "max_profile", "set_by", "created_at", "updated_at")),
     "routing_maps": ("map_id", ("map_id", "provider", "profile", "model", "effort", "set_by", "created_at", "updated_at")),
+    # D11: isolated task worktrees (migration 0009)
+    "task_workspaces": (
+        "task_id",
+        ("task_id", "run_id", "owner", "path", "branch", "base_sha", "state", "patch_ref", "snapshot_id", "detail", "created_at", "updated_at"),
+    ),
     # D10: baselines (migration 0008)
     "baselines": (
         "baseline_id",
@@ -1169,6 +1174,30 @@ def _baseline_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
     return [("baselines", {k: p.get(k) for k in ("baseline_id", "run_id", "check_id", "acceptance_hash", "base_sha", "status", "exit_code", "output_hash", "detail")} | {"created_at": e.at})]
 
 
+_TASK_WORKSPACE_STATES = ("ACTIVE", "SUBMITTED", "INTEGRATED", "CONFLICT", "ABANDONED")
+
+
+def _task_workspace_created(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "tasks", p["task_id"])
+    if get("task_workspaces", p["task_id"]) is not None:
+        raise InvalidTransition(f"task {p['task_id']} already has a workspace")
+    return [("task_workspaces", {k: p.get(k) for k in ("task_id", "run_id", "owner", "path", "branch", "base_sha")}
+             | {"state": "ACTIVE", "patch_ref": None, "snapshot_id": None, "detail": None, "created_at": e.at, "updated_at": e.at})]
+
+
+def _task_workspace_state(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "task_workspaces", p["task_id"])
+    if p["state"] not in _TASK_WORKSPACE_STATES:
+        raise ValidationError(f"task workspace state must be one of {_TASK_WORKSPACE_STATES}")
+    if row["state"] in ("INTEGRATED", "ABANDONED"):
+        raise InvalidTransition(f"task workspace {p['task_id']} is already {row['state']}")
+    row.update(state=p["state"], updated_at=e.at)
+    for key in ("patch_ref", "snapshot_id", "detail", "owner"):
+        if key in p:
+            row[key] = p[key]
+    return [("task_workspaces", row)]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -1221,6 +1250,8 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "routing.pinned": _routing_pinned,
     "routing.mapped": _routing_mapped,
     "baseline.recorded": _baseline_recorded,
+    "task_workspace.created": _task_workspace_created,
+    "task_workspace.state": _task_workspace_state,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 
