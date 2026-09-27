@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .runtime.contracts import TERMINAL_RUN, DomainError, RunLifecycle
 
-V2_COMMANDS = {"pair", "mcp", "service", "usage", "routing", "report"}
+V2_COMMANDS = {"pair", "mcp", "service", "usage", "routing", "report", "integrations", "hook", "statusline", "capabilities"}
 
 
 def add_parsers(sub) -> None:
@@ -67,6 +67,34 @@ def add_usage_parser(sub) -> None:
              "provider_cap: the provider must enforce it per call (Claude cost only), otherwise the run pauses before any work",
     )
     set_.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+
+
+def add_native_parsers(sub) -> None:
+    from .integrations.installer import ITEMS
+
+    integ = sub.add_parser("integrations", help="set up (or remove) DUET in your own Claude Code / Codex, reversibly")
+    integ_sub = integ.add_subparsers(dest="integrations_command", required=True)
+    for name, text in (("plan", "show what would change; changes nothing"), ("install", "apply the plan (needs --yes)"),
+                       ("uninstall", "remove only what DUET installed (needs --yes)"), ("status", "what DUET has installed")):
+        cmd = integ_sub.add_parser(name, help=text)
+        if name in ("plan", "install"):
+            cmd.add_argument("--with", dest="extra", action="append", default=[], choices=["claude-statusline", "claude-stop-hook"],
+                             help="also install an opt-in item (repeatable)")
+            cmd.add_argument("--only", action="append", default=None, choices=list(ITEMS), help="limit to these items")
+        if name in ("install", "uninstall"):
+            cmd.add_argument("--yes", action="store_true", help="apply the changes")
+        cmd.add_argument("--json", action="store_true")
+        cmd.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    hook = sub.add_parser("hook", help="entry point for DUET's Claude Code hooks (installed by duet integrations)")
+    hook.add_argument("kind", choices=["claude-stop"])
+    hook.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    statusline = sub.add_parser("statusline", help="status-line wrapper: runs your own command unchanged and records quota readings")
+    statusline.add_argument("--original", default=None, help=argparse.SUPPRESS)
+    statusline.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    caps = sub.add_parser("capabilities", help="what DUET can and cannot control for each provider here")
+    caps.add_argument("--json", action="store_true")
+    caps.add_argument("--probe", action="store_true", help="also ask the installed CLIs for their controls (runs `--help`/model list)")
+    caps.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
 
 
 def add_report_parser(sub) -> None:
@@ -135,6 +163,19 @@ def dispatch(args) -> int:
             return _routing(args)
         if args.command == "report":
             return _report(args)
+        if args.command == "integrations":
+            return _integrations(args)
+        if args.command == "hook":
+            from .integrations.native import hook_main
+
+            return hook_main(args.kind, _paths(args))
+        if args.command == "statusline":
+            from .integrations.native import original_statusline, statusline_main
+
+            paths = _paths(args)
+            return statusline_main(paths, args.original if args.original is not None else original_statusline(paths))
+        if args.command == "capabilities":
+            return _capabilities(args)
         if args.command == "status":
             return _run_status(args)
         if args.command == "stop":
@@ -353,6 +394,78 @@ def _resume(args) -> int:
         coordinator = _local_coordinator(paths)
         run = coordinator.budget.resume(args.run, reason=f"{args.reason} (service not running: managed peers are not attached)")
     print(f"resumed {args.run}: {run['lifecycle']}")
+    return 0
+
+
+def _integrations(args) -> int:
+    from .integrations.installer import DEFAULT_ITEMS, Installer
+
+    installer = Installer(Path(args.state_root) if getattr(args, "state_root", None) else None)
+    command = args.integrations_command
+    if command == "status":
+        report = installer.status()
+        print(json.dumps(report, indent=2) if args.json else ("installed: " + (", ".join(report["installed"]) or "nothing")))
+        return 0
+    if command == "uninstall":
+        changes = installer.uninstall(yes=args.yes)
+    else:
+        items = tuple(args.only) if args.only else tuple(DEFAULT_ITEMS) + tuple(args.extra)
+        changes = installer.plan(items) if command == "plan" else installer.install(items, yes=args.yes)
+    if args.json:
+        print(json.dumps({"schema": "duet.integrations-plan/1", "applied": bool(getattr(args, "yes", False)), "changes": [c.to_dict() for c in changes]}, indent=2))
+    else:
+        for change in changes:
+            print(f"{change.action:8} {change.item:18} {change.detail}")
+        if command in ("install", "uninstall") and not args.yes:
+            print("nothing changed: re-run with --yes to apply")
+    return 0 if command == "plan" or getattr(args, "yes", False) else 1
+
+
+def _capabilities(args) -> int:
+    from .integrations.installer import Installer, _bin
+
+    installed = Installer(Path(args.state_root) if getattr(args, "state_root", None) else None).status()["installed"]
+    report: dict = {"schema": "duet.capabilities/1", "providers": {}, "integrations": installed}
+    for provider in ("claude", "codex"):
+        binary = _bin(provider)
+        entry: dict = {
+            "cli": binary,
+            "managed": {"delivery": "push (DUET starts a turn when a message arrives)", "model_effort": "set per turn when the CLI exposes them (see --probe)"},
+            "native": {
+                "delivery": ("checkpoint: the session sees messages when it calls duet_wait/duet_status"
+                             + ("; the Stop hook asks it to answer pending requests before it stops" if provider == "claude" and "claude-stop-hook" in installed else "")),
+                "model_effort": "advisory: DUET never changes a native session's model or effort",
+                "identity": "connection-bound (the MCP proxy's host process)",
+            },
+            "live_delivery": ("unavailable: Claude Channels is a preview feature that DUET does not enable without your explicit approval"
+                              if provider == "claude" else "unavailable: no supported live-control endpoint for an existing Codex session"),
+        }
+        if args.probe and binary:
+            try:
+                if provider == "claude":
+                    from .providers.claude_cli import ClaudeCLIAdapter
+
+                    entry["probe"] = ClaudeCLIAdapter(binary).capabilities().to_dict()
+                else:
+                    from .providers.codex_appserver import CodexAppServerAdapter
+
+                    adapter = CodexAppServerAdapter(binary)
+                    try:
+                        entry["probe"] = adapter.capabilities().to_dict()
+                    finally:
+                        adapter.close()
+            except Exception as exc:  # report, never fail
+                entry["probe"] = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        report["providers"][provider] = entry
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    for provider, entry in report["providers"].items():
+        print(f"{provider}: {'found at ' + entry['cli'] if entry['cli'] else 'CLI not found'}")
+        print(f"  managed: {entry['managed']['delivery']}; model/effort {entry['managed']['model_effort']}")
+        print(f"  native:  {entry['native']['delivery']}; model/effort {entry['native']['model_effort']}")
+        print(f"  live delivery: {entry['live_delivery']}")
+    print("integrations installed: " + (", ".join(installed) or "none"))
     return 0
 
 

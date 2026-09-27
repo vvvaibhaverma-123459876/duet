@@ -488,3 +488,17 @@ validators. D04 code is unchanged.
 - An integration in doubt after a crash is settled from the workspace
   contents (reverse-applies, applies, or neither). A second application
   happens only when the files prove the first did not.
+
+## D-033: Native integration setup and coverage (D12)
+
+- MCP registration goes through the clients' own `mcp add/get/remove`
+  commands. DUET edits `~/.claude/settings.json` only for the opt-in status
+  line and Stop hook: precisely, with a one-time backup, and recorded in an
+  ownership manifest (`<state>/integrations.json`) with the original
+  values.
+- Nothing is applied without `--yes`. Uninstall removes only owned items
+  and never overwrites a later user change.
+- The Stop hook blocks at most once per stop (`stop_hook_active`) and
+  never fails the client.
+- Live push into native sessions is reported as unavailable, not simulated.
+  Claude Channels stays off until the user approves a supported setup.

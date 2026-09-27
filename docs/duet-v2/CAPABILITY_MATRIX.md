@@ -51,7 +51,7 @@ compatibility.
 | AT03 | DUET launches both managed | D05 | `test_duet_pair_with_emulated_managed_sessions` (CLI → service → real adapters → emulated provider processes → `duet mcp serve`), `test_duet_originated_pair_is_labelled_managed`; gated real: `tests/e2e_peer/test_real_pair.py` | TESTED_SIM; LIVE: NOT_RUN |
 | AT04 | Both ask while waiting | D05 | `test_a_asks_b_b_asks_a_a_answers_b_continues`, `test_simultaneous_questions_do_not_deadlock`, `test_waits_are_served_concurrently`, MCP pair test (wait already blocked when the question arrives) | TESTED_SIM |
 | AT05 | Redelivery/reconnect | D02/D05 | `test_redelivery_until_acknowledged`, `test_unacknowledged_messages_are_redelivered_after_reconnect`, `test_proxy_restart_reconnects_the_same_session` (MCP), `test_restart_settles_interrupted_checks` | TESTED_SIM |
-| AT06 | Live delivery unsupported | D12 | | NOT_STARTED |
+| AT06 | Live delivery unsupported | D12 | `duet capabilities` (live delivery unavailable), `test_stop_hook_asks_the_session_to_answer_its_peer` | TESTED_SIM |
 | AT07 | Peer quota before mandatory review | D08 | `test_peer_quota_loss_keeps_the_review_pending` | TESTED_SIM |
 | AT08 | Unknown usage | D07 | `test_unknown_usage_is_never_zero`, `test_absent_final_usage_after_cancellation_stays_unknown`, `test_usage_records_are_deduplicated_and_unknown_is_not_zero` (pool marked uncertain) | TESTED_SIM |
 | AT09 | Two runs share pool | D07 | `test_two_models_and_two_runs_share_one_pool_without_double_counting`, `test_reservations_draw_down_and_refuse_atomically`, `test_two_processes_cannot_both_take_the_last_unit` | TESTED_SIM |
@@ -84,7 +84,7 @@ compatibility.
 | AT36 | Inputs mutate during verification | D03 | `test_mutation_during_check_invalidates`, `test_transient_caches_do_not_invalidate` | TESTED_SIM |
 | AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
 | AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, migrations 0001–0003, participant instructions, Claude skill) | TESTED_SIM |
-| AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |
+| AT39 | Integration install/uninstall | D12/D13 | `test_setup_is_planned_approved_and_reversible`, `test_uninstall_leaves_what_the_user_changed_and_what_it_did_not_own` | TESTED_SIM (fake CLIs) |
 | AT40 | Quota reset with stale telemetry | D08/D11 | `test_quota_holds_probe_once_and_release`, `test_a_passive_quota_read_ends_the_pause_without_a_probe` | TESTED_SIM (D08 part); crash matrix: D11 |
 | AT41 | Mid-turn setting change unsupported | D04/D09 | `test_native_sessions_get_advice`, `test_profile_requests_raise_managed_and_advise_native` | TESTED_SIM |
 | AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |

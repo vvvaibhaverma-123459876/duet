@@ -4,10 +4,10 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D11** (parallel work and recovery; see `D11_REPORT.md`). Before that **D10** (final review and completion). Before that D09 (routing) and **D08** (see `D01_REPORT.md` to `D08_REPORT.md`). D06 is `619ca53`, the core review fixes are `e71d957`, the D07 ledger is `2b390ea`, and D07's persistence is `5814b11`. D08 is the commit that adds `docs/duet-v2/D08_REPORT.md`.
+- Last completed milestone: **D12** (native integrations and coverage; see `D12_REPORT.md`). Before that **D11** (parallel work and recovery). Before that **D10** (final review and completion). Before that D09 (routing) and **D08** (see `D01_REPORT.md` to `D08_REPORT.md`). D06 is `619ca53`, the core review fixes are `e71d957`, the D07 ledger is `2b390ea`, and D07's persistence is `5814b11`. D08 is the commit that adds `docs/duet-v2/D08_REPORT.md`.
 - Changed in D08: `duet/usage/{estimation,admission,reservations}.py`, `duet/runtime/budgeting.py`, migration `0006_admission.sql`, and `duet/runtime/{api,pools,reducer,peers,pairing,service}.py`, `duet/cli.py`, `duet/cli_v2.py`. Tests: `tests/usage/test_admission.py`, `tests/runtime/test_finishing_reserves.py`, `tests/integrations/test_admission_service.py`; one service test was rewritten for D08 semantics.
 - `feat/isolate-modes` is merged in (`9db29f3`).
-- Suite after D11: core 862 passed/6 skipped; mcp 867/4 (root and non-root). After D10: 857/6 and 862/4. After D09: 849/6 and 854/4. Earlier, after D08 plus the merged D06 review fixes (`fix-d06-review`, `6a9f5bd`) and the process/umask hardening, all on the final tree:
+- Suite after D12: core 868 passed/6 skipped; mcp 873/4 (root and non-root). After D11: 862/6 and 867/4. After D10: 857/6 and 862/4. After D09: 849/6 and 854/4. Earlier, after D08 plus the merged D06 review fixes (`fix-d06-review`, `6a9f5bd`) and the process/umask hardening, all on the final tree:
   core only as root, 817 passed and 6 skipped (`python3 -m pytest -q -p no:cacheprovider tests`); with `mcp==2.2.0` (scratch `mcpvenv`) as root, 822 passed and 4 skipped; the **whole suite** as non-root (`ubuntu`, umask 002, own venv with `.[test,mcp]` in `/home/ubuntu/venv`, copy in `/home/ubuntu/duet-ci`), 822 passed and 4 skipped.
 - Review status: the internal Claude review of D06/D07 is done (13 reproductions) and every confirmed finding is fixed. The usage findings are in D08 (`D08_REPORT.md`) and the task-graph findings in `6a9f5bd` (`D06_REPORT.md`). The independent Codex review is still pending for D01–D08.
 - CI: `test_detached_descendant_is_killed_after_normal_exit` failed twice on non-root runners (`e71d957`, `5814b11`). It never reproduced locally (300+ runs, under load, as non-root with the MCP tests). The final group kill now re-sends until the group is empty, and the test reports the survivor's state, parent, group and session if it recurs. If it does, that output is the next lead.
@@ -27,7 +27,7 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-1. D12: native live enhancements and transparent control coverage (status-line and hooks installer with reversible, owned changes; optional live delivery behind an explicit gate; control-coverage reporting; native subagent disclosure).
+1. D13: CLI compatibility, packaging, portability and operational hardening (versioned typed config with precedence and legacy migration with dry-run/backup/rollback; packaged-wheel checks; redaction and bounded logs; stable exit codes; secret/escaping-symlink policy evidence).
 2. A person with both CLIs logged in runs `PEER_ALPHA_TEST.md` (AT01–AT03).
 
 ## Uncommitted files
