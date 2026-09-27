@@ -1,0 +1,34 @@
+{
+  "claude/statusline-docs-full-schema.json": {
+    "origin": "verbatim",
+    "url": "https://code.claude.com/docs/en/statusline",
+    "section": "Available data > Full JSON schema",
+    "retrieved": "2026-09-27",
+    "fetched_as": "https://code.claude.com/docs/en/statusline.md",
+    "notes": "Copied byte-for-byte from the documented example (code block dedented by the page's two-space indentation)."
+  },
+  "claude/statusline-docs-mock-input.json": {
+    "origin": "verbatim",
+    "url": "https://code.claude.com/docs/en/statusline",
+    "section": "Tips > Test with mock input",
+    "retrieved": "2026-09-27",
+    "notes": "The documented minimal mock payload: most fields absent."
+  },
+  "claude/stream-parallel-tool-use.jsonl": {
+    "origin": "constructed",
+    "url": "https://code.claude.com/docs/en/agent-sdk/cost-tracking",
+    "retrieved": "2026-09-27",
+    "notes": "Built from the documented semantics (single message input mode): messages of one step share an id and identical usage; per-message output_tokens is a placeholder; the result's modelUsage/total_cost_usd are the call totals. Not captured from a live run; ids and numbers are invented."
+  },
+  "codex/token-usage-updates.jsonl": {
+    "origin": "constructed",
+    "schema": "tests/fixtures/provider_protocols/codex/0.157.1/schema-subset.json (ThreadTokenUsageUpdatedNotification)",
+    "source_semantics": "https://github.com/openai/codex codex-rs/protocol/src/protocol.rs (main @ 8f195c93, retrieved 2026-09-27): TokenUsageInfo::append_last_usage (total += last), TokenUsage::non_cached_input (input - cached)",
+    "notes": "Shaped to the generated 0.157.1 schema; emittedAtMs as observed on the live unauthenticated handshake. Includes a verbatim replay and a re-emitted replay of the second update. Not captured from an authenticated turn."
+  },
+  "codex/rate-limits.json": {
+    "origin": "constructed",
+    "schema": "tests/fixtures/provider_protocols/codex/0.157.1/schema-subset.json (GetAccountRateLimitsResponse, AccountRateLimitsUpdatedNotification)",
+    "notes": "The update is sparse on purpose (schema: 'Clients should merge available values'). resetsAt is epoch seconds. Not captured live (rate limits need an authenticated account)."
+  }
+}

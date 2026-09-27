@@ -271,3 +271,65 @@ count (R01). This tightens the D03 gate.
 - The role of writer moves by `duet_handoff`: the writer hands it over, or
   the reviewer takes it over when the writer is unavailable. The outgoing
   writer's active code tasks return to READY.
+
+## D-023: Usage observations and ledger semantics (D07)
+
+- `duet.usage.Observation` is the one normalised record: provider,
+  account/pool (None = unknown), session, run, metric (and so its
+  dimension), scope, source, `source_event_id`, epoch, baseline, quality
+  (`observed`, `estimated`, `unknown`) and a UTC time. Money is `Decimal`,
+  never float. Unknown is `value=None` with quality `unknown`, never zero.
+  Gauge dimensions (quota windows, context occupancy, elapsed deadline)
+  only take point-in-time scopes, so they cannot become consumption.
+- The ledger (`duet.usage.Ledger`) is pure and keeps only deduplicated raw
+  observations. Everything else is derived on demand and does not depend
+  on arrival order. A replay keeps the earliest timestamp; the same
+  identity with a different value is a recorded conflict.
+- For each (provider, session, metric), the first source in the policy that
+  is present is primary and is the only one counted. Other sources
+  validate it (agree, lagging, ahead, disagree, incomparable) and never
+  add to it. Defaults: the Claude CLI result, then the status line; Claude
+  `modelUsage` for tokens; the Codex thread `total`. An undesignated source
+  alone yields unknown.
+- Cumulative counters become deltas only within one declared epoch, per
+  key. The first value counts from its baseline: zero for a session DUET
+  saw created, the parent's level for a fork, otherwise unknown and bounded
+  by the value. A decrease is a recorded reset, and its interval is
+  unknown. An unknown marker (for example a cancelled turn) is resolved
+  only by a later value that covers its time.
+- Deltas are attributed to the pool of their observation. A pool change
+  within a counter, or an unknown pool, leaves the delta unattributed.
+  Quota windows are latest-value gauges per pool and window. They are
+  never converted into tokens, and never combined across providers.
+- Token totals follow a per-provider algebra. Codex: `total`, or
+  input + output, since cached input is inside input and reasoning inside
+  output; `cacheWriteInputTokens` is never added because its relation is
+  unverified. Claude: the four fields are disjoint.
+- The pure layer keeps exact `Decimal` values. Converting them to D-003's
+  integer micro-units, including how to round sub-micro per-model costs,
+  is the persistence layer's decision.
+
+## D-024: Claude status-line telemetry (D07)
+
+`duet.integrations.claude_statusline` reads only allowlisted fields of the
+documented payload: session id, version, model id/name, cost and durations,
+context-window figures and rate-limit windows. JSON floats are parsed as
+`Decimal`. Paths, names, prompt ids, PR data and unknown fields are never
+copied, and the transcript is never opened. Everything is keyed by
+`session_id`, never by a process id. The cost is a session-cumulative
+estimate whose first value has an unknown baseline. Context figures are
+gauges. Rate-limit windows are capacity with an unknown pool, because the
+payload names no account. `run_status_line(original_command, stdin)` runs
+the user's command with the untouched stdin and returns its output and
+exit status byte for byte. Telemetry errors are reported, never shown.
+Installing the wrapper is a later milestone.
+
+## D-025: Codex `tokenUsage.last` is one update, not one turn (D07)
+
+In codex-rs, each `thread/tokenUsage/updated` adds its `last` to `total`
+(`TokenUsageInfo::append_last_usage`), so a turn with several model
+requests has several `last` values. The D04 collector keeps only the final
+update, so its `turn`-scoped observations are not the turn's usage. The
+ledger therefore uses the thread `total` as primary. Adapters from a
+`TurnResult` drop `last`. Raw notifications keep it, as call-scoped
+validators. D04 code is unchanged.

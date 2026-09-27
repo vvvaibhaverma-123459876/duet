@@ -1,0 +1,64 @@
+{
+  "read_result": {
+    "accountId": "acct-7f3a",
+    "ordinaryUsageAllowed": true,
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": {
+        "usedPercent": 42,
+        "windowDurationMins": 300,
+        "resetsAt": 1790500000
+      },
+      "secondary": {
+        "usedPercent": 7,
+        "windowDurationMins": 10080,
+        "resetsAt": 1791000000
+      },
+      "credits": null,
+      "planType": null
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": {
+          "usedPercent": 42,
+          "windowDurationMins": 300,
+          "resetsAt": 1790500000
+        },
+        "secondary": {
+          "usedPercent": 7,
+          "windowDurationMins": 10080,
+          "resetsAt": 1791000000
+        },
+        "credits": null,
+        "planType": null
+      },
+      "codex_bengalfox": {
+        "limitId": "codex_bengalfox",
+        "limitName": "GPT-5.3-Codex-Spark",
+        "primary": {
+          "usedPercent": 12,
+          "windowDurationMins": 300,
+          "resetsAt": 1790500000
+        },
+        "secondary": null
+      }
+    }
+  },
+  "updated": {
+    "method": "account/rateLimits/updated",
+    "params": {
+      "rateLimits": {
+        "limitId": "codex",
+        "primary": {
+          "usedPercent": 45,
+          "windowDurationMins": 300,
+          "resetsAt": 1790500000
+        }
+      }
+    },
+    "emittedAtMs": 1790400060000
+  }
+}
