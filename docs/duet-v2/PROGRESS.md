@@ -14,7 +14,8 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | D06 Task graph & scheduler | done | `619ca53` | `runtime/{taskplan,scheduler,taskgraph}.py`, migration 0004, 5 tools, evidence-only contributions; plus review fixes | 82 sim + 22 integration + 8 verification tests; suite 651/6 (core), 656/4 (mcp) | internal Claude review of D01–D05 done (findings fixed or in progress); Codex review pending | n/a |
 | D07 Usage telemetry & ledger | done | `2b390ea`, `5814b11` | `duet/usage` (observations, ledger), status-line parser, `runtime/pools.py`, migration 0005, `duet usage` | 71 ledger + 7 pool + integration tests | internal Claude review of D06/D07 done: usage findings fixed in D08, task-graph findings fixed in `6a9f5bd`; Codex review pending | n/a |
 | D08 Completion-aware admission | done | see HANDOFF | `duet/usage/{estimation,admission,reservations}.py`, `runtime/budgeting.py`, migration 0006, admitted managed turns, quota pause/resume, `duet resume --run` | 19 pure + 11 store + 7 service tests; suite 817/6 (core), 822/4 (mcp, root and non-root) | Codex review pending | NOT_RUN (no real quota exhaustion observed) |
-| D09–D14 | not started | | | | | |
+| D09 Adaptive routing | done | see HANDOFF | `duet/routing`, `runtime/routing_control.py`, migration 0007, routed managed turns, `duet_request_profile`, `duet routing` | 26 policy + 6 service tests; suite 849/6 (core), 854/4 (mcp, root and non-root) | Codex review pending | NOT_RUN |
+| D10–D14 | not started | | | | | |
 
 Independent review: Codex is not installed or authenticated in this
 environment, so no Claude–Codex review has taken place. Every milestone

@@ -33,7 +33,7 @@ compatibility.
 | R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
 | R06 | Honest resources | D01, D07 | TESTED_SIM (legacy nullable cost; v2 observations with quality/scope/epoch, unknown never zero, context and quota as gauges, deduplicated pool records, cumulative totals as deltas) |
 | R07 | Completion reserve | D08 | TESTED_SIM (review and repair turns reserved per provider when the pair forms; finishing turns draw once; optional work cannot touch reserves; quota loss keeps the review pending) |
-| R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery from help/model catalogue; requested/accepted/observed recorded; unsupported rejected); routing: D09 |
+| R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery; requested/accepted/observed recorded per routed turn, differences flagged; refused settings excluded with evidence; native sessions advisory) |
 | R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM: legacy (D01) and v2 predicate with controller-only finalisation (D03); joint authorship: D10 |
 | R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; mutation invalidates); delta reviews and caching: D10 |
 | R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree leaves the user checkout byte-identical; one fenced writer; explicit checked imports); integration locking: D11 |
@@ -61,11 +61,11 @@ compatibility.
 | AT13 | Optional work vs finishing reserve | D08 | `test_local_turn_allowance_protects_the_review`, `test_optional_work_cannot_spend_the_finishing_reserve` | TESTED_SIM |
 | AT14 | Mandatory action draws reserve once | D08 | `test_review_capacity_is_reserved_and_drawn_once`, `test_a_finishing_action_draws_its_reserve_once` | TESTED_SIM |
 | AT15 | Hard billing cap unavailable | D08 | `test_an_unenforceable_cap_stops_paid_work_before_it_starts`, `test_a_provider_enforced_cap_is_passed_per_call` | TESTED_SIM |
-| AT16 | Small security-sensitive patch | D09 | | NOT_STARTED |
-| AT17 | Unsupported effort / org clamp | D09 | adapter-level rejection tests (D04) | PARTIAL: rejection TESTED_SIM; clamp detection needs live observation: NOT_RUN |
-| AT18 | User pins model/effort | D09/D12 | | NOT_STARTED |
-| AT19 | Missing dependency failure | D09 | | NOT_STARTED |
-| AT20 | Repeated no-progress repairs | D06/D09 | `test_repeated_failures_replan_then_pause`, `test_message_ping_pong_stalls_then_pauses`, scheduler simulation (bounded re-plan then pause) | TESTED_SIM (bounded re-plan, then honest pause); model escalation: D09 |
+| AT16 | Small security-sensitive patch | D09 | `test_a_small_security_patch_gets_a_deep_review` | TESTED_SIM |
+| AT17 | Unsupported effort / org clamp | D09 | `test_a_refused_setting_is_downgraded_and_a_clamp_is_reported` | TESTED_SIM |
+| AT18 | User pins model/effort | D09/D12 | `test_a_user_pin_is_respected_even_below_the_floor` | TESTED_SIM (D09 part) |
+| AT19 | Missing dependency failure | D09 | `test_an_environment_failure_is_diagnosed_not_escalated` | TESTED_SIM |
+| AT20 | Repeated no-progress repairs | D06/D09 | `test_repeated_failures_replan_then_pause` (D06), `test_repeated_hypothesis_failures_replan_with_one_bounded_escalation` | TESTED_SIM (D09 part) |
 | AT21 | Old green suite, feature absent | D01/D10 | legacy `test_suite_green_at_baseline_does_not_end_the_session`; v2 `test_green_existing_suite_without_the_feature_is_not_complete` | TESTED_SIM |
 | AT22 | DONE with missing verifier | D01 | `test_d01_semantics.py::TestCompletion::test_done_with_missing_verifier_is_unverified`, battery `test_scratch_run_without_verifier_is_unverified` | TESTED_SIM |
 | AT23 | Approval of old revision | D10 | `test_approval_of_an_old_snapshot_does_not_count` | TESTED_SIM (D03); delta-review rules: D10 |
@@ -86,7 +86,7 @@ compatibility.
 | AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, migrations 0001–0003, participant instructions, Claude skill) | TESTED_SIM |
 | AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |
 | AT40 | Quota reset with stale telemetry | D08/D11 | `test_quota_holds_probe_once_and_release`, `test_a_passive_quota_read_ends_the_pause_without_a_probe` | TESTED_SIM (D08 part); crash matrix: D11 |
-| AT41 | Mid-turn setting change unsupported | D04/D09 | settings applied only at invocation (Claude) or `turn/start` (Codex); no steering-based switching | PARTIAL: adapters TESTED_SIM; routing boundary: D09 |
+| AT41 | Mid-turn setting change unsupported | D04/D09 | `test_native_sessions_get_advice`, `test_profile_requests_raise_managed_and_advise_native` | TESTED_SIM |
 | AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |
 | AT43 | No sandbox for borrowed session | D13 | | NOT_STARTED |
 | AT44 | Same snapshot checked twice | D10 | | NOT_STARTED |

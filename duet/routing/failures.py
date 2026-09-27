@@ -1,44 +1,62 @@
 """Failure classification (spec 8.4): what kind of help a failure needs.
 
-classify(record: FailureRecord) -> tuple[str, Reason]
-  Returns one of FAILURE_CLASSES and the evidence:
-  - "environment": the tool or dependency is missing or broken, not the
-    reasoning: command not found, No such file or directory (for an
-    executable or interpreter), ModuleNotFoundError / ImportError / No
-    module named, cannot find package, permission denied, network
-    unreachable / connection refused / name resolution, disk full, exit
-    code 126/127 when visible. Needs environment repair, never a stronger
-    model (AT19).
-  - "requirements": the task is unclear: the agent asked a question it
-    could not answer itself, or text says ambiguous / unclear requirement /
-    which of / not specified. Needs an explicit assumption or a question.
-  - "hypothesis": the code ran and was wrong: assertion errors, test
-    failures (FAILED, AssertionError, expected ... got), a review that
-    requested changes. More reasoning or a different investigation may help.
-  - "provider": quota, rate limit, auth, billing, overloaded, model
-    unavailable (record.kind or text). Admission (D08) owns these.
-  - "timeout": timed out / deadline.
-  - "unknown": none of the above.
-  Matching is case-insensitive on record.text and record.kind; the first
-  matching class in the order provider, environment, timeout, requirements,
-  hypothesis wins, so "ModuleNotFoundError" inside a pytest failure is
-  environment, not hypothesis.
+- environment: a tool, module, file or permission is missing: repair the
+  environment; a stronger model would not help (AT19).
+- requirements: the task is unclear: state an assumption or ask.
+- hypothesis: the code ran and was wrong (assertions, failing tests,
+  changes requested): more reasoning or a different approach may help.
+- provider: quota, rate limits, auth, billing, overload: admission (D08)
+  owns these; routing ignores them.
+- timeout, unknown.
 
-summarise(failures) -> dict[str, int]: counts per class, all classes present.
-consecutive(failures, cls) -> int: how many of the newest failures in a row
-  have class `cls`."""
+Classes are tried in the order provider, environment, timeout,
+requirements, hypothesis: a ModuleNotFoundError inside pytest output is an
+environment failure, not a wrong hypothesis."""
 from __future__ import annotations
 
-from .contracts import FailureRecord, Reason
+import re
+
+from .contracts import FAILURE_CLASSES, FailureRecord, Reason
+
+_PATTERNS: tuple[tuple[str, re.Pattern], ...] = (
+    ("provider", re.compile(r"rate.?limit|usage limit|quota|overloaded|billing|payment required|not logged in|authenticat|unauthori[sz]ed|model.{0,20}(not found|unavailable)", re.I)),
+    ("environment", re.compile(
+        r"command not found|: not found\b|No such file or directory|ModuleNotFoundError|ImportError|No module named|cannot find package|"
+        r"Permission denied|Network is unreachable|Connection refused|Name or service not known|Temporary failure in name resolution|"
+        r"No space left on device|exit code 12[67]\b", re.I)),
+    ("timeout", re.compile(r"timed out|timeout expired|deadline exceeded", re.I)),
+    ("requirements", re.compile(r"ambiguous|unclear requirement|requirement is unclear|not specified|which of (these|the)|clarif", re.I)),
+    ("hypothesis", re.compile(r"AssertionError|assert |FAILED|failures?=|expected .{0,80} got|Traceback|changes requested|result rejected|Error", re.I)),
+)
+_PROVIDER_KINDS = {"quota", "rate_limit", "overloaded", "auth", "billing", "model_unavailable"}
 
 
 def classify(record: FailureRecord) -> tuple[str, Reason]:
-    raise NotImplementedError
+    if record.kind in _PROVIDER_KINDS:
+        return "provider", Reason("failure:provider", f"{record.source} failed: {record.kind}")
+    if record.kind == "timeout":
+        return "timeout", Reason("failure:timeout", f"{record.source} timed out")
+    text = record.text or ""
+    for cls, pattern in _PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return cls, Reason(f"failure:{cls}", f"{record.source}: {match.group(0).strip()[:80]}")
+    if record.source == "review":
+        return "hypothesis", Reason("failure:hypothesis", "a review requested changes")
+    return "unknown", Reason("failure:unknown", f"{record.source} failed without a recognisable cause")
 
 
-def summarise(failures: tuple[FailureRecord, ...] | list[FailureRecord]) -> dict[str, int]:
-    raise NotImplementedError
+def summarise(failures) -> dict[str, int]:
+    counts = {cls: 0 for cls in FAILURE_CLASSES}
+    for record in failures:
+        counts[classify(record)[0]] += 1
+    return counts
 
 
-def consecutive(failures: tuple[FailureRecord, ...] | list[FailureRecord], cls: str) -> int:
-    raise NotImplementedError
+def consecutive(failures, cls: str) -> int:
+    count = 0
+    for record in reversed(list(failures)):
+        if classify(record)[0] != cls:
+            break
+        count += 1
+    return count
