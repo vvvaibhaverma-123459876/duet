@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
+
+try:  # POSIX advisory locking; the registry is best-effort elsewhere.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 MAX_ENTRIES = 200
 
@@ -19,7 +25,8 @@ class RunEntry:
     started: float
     outcome: str = ""  # empty while running
     ended: float = 0.0
-    cost_usd: float = 0.0
+    cost_usd: float = 0.0  # sum of reported costs only
+    cost_unknown_turns: int = 0
 
     def status(self) -> str:
         if self.outcome:
@@ -42,20 +49,23 @@ def register_run(workspace: Path, branch: str, task: str) -> str:
         task_head=" ".join(task.split())[:80],
         started=time.time(),
     )
-    entries = _load()
-    entries.append(entry)
-    _save(entries[-MAX_ENTRIES:])
+    with _locked():
+        entries = _load()
+        entries.append(entry)
+        _save(entries[-MAX_ENTRIES:])
     return run_id
 
 
-def finish_run(run_id: str, outcome: str, cost_usd: float = 0.0) -> None:
-    entries = _load()
-    for entry in entries:
-        if entry.run_id == run_id:
-            entry.outcome = outcome
-            entry.ended = time.time()
-            entry.cost_usd = cost_usd
-    _save(entries)
+def finish_run(run_id: str, outcome: str, cost_usd: float = 0.0, cost_unknown_turns: int = 0) -> None:
+    with _locked():
+        entries = _load()
+        for entry in entries:
+            if entry.run_id == run_id:
+                entry.outcome = outcome
+                entry.ended = time.time()
+                entry.cost_usd = cost_usd
+                entry.cost_unknown_turns = cost_unknown_turns
+        _save(entries)
 
 
 def list_runs(limit: int = 15) -> list[RunEntry]:
@@ -69,27 +79,62 @@ def format_runs(entries: list[RunEntry]) -> str:
     for entry in entries:
         started = time.strftime("%m-%d %H:%M", time.localtime(entry.started))
         cost = f" ${entry.cost_usd:.2f}" if entry.cost_usd else ""
+        if entry.cost_unknown_turns:
+            cost += "+?" if cost else " $?"
         lines.append(
-            f"  [{entry.status():>8}] {started}  pid={entry.pid}{cost}  {entry.workspace}"
+            f"  [{entry.status():>14}] {started}  pid={entry.pid}{cost}  {entry.workspace}"
             f"  ({entry.branch or 'scratch'})  {entry.task_head}"
         )
     return "\n".join(lines)
+
+
+@contextlib.contextmanager
+def _locked():
+    """Serialise read-modify-write across concurrent duet processes so parallel
+    runs cannot drop each other's entries."""
+    path = registry_path()
+    handle = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path.with_suffix(".lock"), "a+", encoding="utf-8")
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    except OSError:
+        handle = None  # advisory registry: never break a run over it
+    try:
+        yield
+    finally:
+        if handle is not None:
+            try:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
 
 
 def _load() -> list[RunEntry]:
     path = registry_path()
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return [RunEntry(**item) for item in raw]
-    except (OSError, json.JSONDecodeError, TypeError):
+    except (OSError, json.JSONDecodeError):
         return []
+    known = {f.name for f in fields(RunEntry)}
+    entries = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            entries.append(RunEntry(**{k: v for k, v in item.items() if k in known}))
+        except TypeError:
+            continue  # one malformed entry must not hide the others
+    return entries
 
 
 def _save(entries: list[RunEntry]) -> None:
     path = registry_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps([asdict(entry) for entry in entries], indent=1), encoding="utf-8")
         tmp.replace(path)
     except OSError:

@@ -70,7 +70,7 @@ duet stop codex --yes        # stop without prompting (SIGINT; --force for SIGTE
 duet peek codex              # read-only tail of the most recent Codex session
 duet peek claude ID --repo P # same for a Claude Code session of repo P
 duet replay transcript.json  # render markdown
-duet init --project          # write ./duet.toml
+duet init --project          # write ./duet.toml (refuses to overwrite; --force to replace)
 duet init --user             # write ~/.config/duet/config.toml
 duet --version
 ```
@@ -99,7 +99,13 @@ Live mode is safe by default:
   (`git log`, `git diff`) and merge deliberately.
 - `--rollback-on-failure` discards the Duet branch if the session does not
   succeed (or is interrupted); otherwise the branch is left for inspection.
-- `--branch NAME` overrides the generated branch name.
+- `--branch NAME` overrides the generated branch name, and `--base REF` chooses
+  what it branches off. If `NAME` already exists Duet fails rather than resetting
+  it. When you pass `--branch`, your task prompt should **not** also tell the
+  agents to create a branch — Duet already did, and they should commit onto it.
+
+`--repo` edits your real repo in place. To work inside an isolated replica
+instead, see [Isolation modes](#isolation-modes) below.
 
 Because the bundled agent commands run non-interactively
 (`--dangerously-skip-permissions` for Claude, `--ask-for-approval never` for
@@ -176,6 +182,46 @@ lock and its own `duet/session-*` branch, so concurrent sessions on different
 repos (or worktrees of one repo) do not interfere. Duet does not open terminal
 windows for you; run each session in its own terminal or under `tmux`.
 
+## Peer pairing (v2, early)
+
+The v2 runtime pairs a Claude session and a Codex session as peers. Either
+one can ask the other a question at any time, and neither waits on its own
+question. DUET, not the agents, decides completion: it runs the checks on
+the exact submitted snapshot and requires a review by the other provider.
+
+**Status:** tested against protocol emulators only. No real Claude–Codex
+pair has run yet, so this is not "peer alpha". See
+`docs/duet-v2/D05_REPORT.md` and `docs/duet-v2/PEER_ALPHA_TEST.md`.
+
+From your own Claude Code or Codex session (the session stays a participant):
+
+```bash
+pip install 'duet[mcp]'
+claude mcp add duet -- duet mcp serve
+codex mcp add duet -- duet mcp serve
+```
+
+Then ask the session to "use DUET to pair with Codex (or Claude) on <task>,
+checked by `<test command>`". It calls `duet_join` and the other `duet_*`
+tools. With `peer="managed"` DUET starts the other agent. With
+`peer="invite"` you pass an invite to your other session once, and you never
+relay messages after that. From inside a session, never run `duet pair`: it
+starts two new managed agents instead of using the session you are in.
+
+From a terminal, with both sessions launched and labelled `managed` by DUET:
+
+```bash
+duet pair "add mul(a, b) to calc.py" --check "python check_feature.py"
+duet status --run RUN_ID [--json]
+duet stop --run RUN_ID
+duet service status | stop
+```
+
+Work happens in a DUET worktree on a `duet/run-...` branch; your checkout is
+never touched. A verified change is committed to that branch. Nothing is
+pushed or merged. Runs use your existing CLI logins: no API keys, no paid
+fallback. Model and effort are fixed in this version.
+
 ## Verification gates
 
 `--verify` accepts `pytest`, `none`, or `cmd:<shell command>`, and can be
@@ -190,26 +236,145 @@ duet run --repo . \
   "Fix the dashboard health check"
 ```
 
-## Worktree isolation
+The checks run once before turn 1 (the baseline) and after every turn. A
+passing check establishes completion only together with an agent's `[[DONE]]`,
+or when the check was failing at baseline and now passes (red to green): a
+suite that was already green before any work proves nothing about the task.
+`[[DONE]]` counts only on the agent's final line, so prose that merely
+mentions the token does not end a session. When a `[[DONE]]` is refused
+because checks fail, the next prompt says so and includes the failing output.
 
-`--worktree` (on `run`/`exec`/`connect`/`resume`) runs the session in a linked
-`git worktree` created from HEAD. Your checkout — current branch, index, open
-editors, a live agent TUI sitting in the repo — is never switched or touched.
-The session branch lands in the main repo as usual; the worktree is kept for
-inspection (cleanup command printed at the end), and `--rollback-on-failure`
-removes both worktree and branch.
+### Outcomes and exit codes
+
+| Outcome | Meaning | Exit |
+|---|---|---|
+| `success` | a configured check passed on the final workspace and completion was established | 0 |
+| `halted` | stopped before completion (turn/time/budget cap, loop, quota, agent or git error) | 2 |
+| `unverified` | an agent reported completion, but no configured check verified it; add `--verify` | 3 |
+| `review_pending` | complete and checked, but a partner dropped for quota still owes review of the final changes | 4 |
+| `interrupted` | stopped by Ctrl-C/SIGTERM; transcript and resume manifest are saved | 130 |
+
+Exit 1 means a usage, configuration, or preflight error. Runs without `--verify`
+therefore end `unverified`, not `success`: agent agreement is a claim, not proof.
+`--rollback-on-failure` discards the branch only for `halted`/`interrupted`;
+unverified or review-pending work is kept for you to check.
+
+## Isolation modes
+
+`--isolate` chooses how far a `--repo` session is separated from your real
+repository. It only applies together with `--repo`; from-scratch runs already work
+in a fresh scratch workspace.
+
+| `--isolate` | Agents work in | History | Untracked/ignored files | Your repo |
+| --- | --- | --- | --- | --- |
+| `none` *(default)* | the real repo | full | present | branch cut, tree edited |
+| `worktree` | a linked git worktree | full | **absent** — use `--carry` | branch added, checkout untouched |
+| `snapshot` | a full copy in a temp dir | full | present | **never touched** |
+
+Bare `--repo` is exactly `--repo --isolate none`, unchanged from earlier versions.
+`--worktree` remains an alias for `--isolate worktree`.
+
+```bash
+# Faithful, runnable replica: deps, .env, full history, real origin — source untouched.
+duet run --repo ./app --isolate snapshot "Fix the flaky retry test" --verify pytest
+
+# Skip the expensive ignored directories.
+duet run --repo ./app --isolate snapshot --exclude node_modules --exclude .venv "..."
+
+# Worktree starts from a clean checkout, so bring the files it omits.
+duet run --repo ./app --worktree --carry .env "..."
+```
+
+**`worktree` omits untracked and ignored files.** It is a clean checkout of a
+commit, so `.env`, `node_modules/`, `.venv/`, and build output are simply not
+there, and a repo that needs them will not run. `--carry <path>` (repeatable)
+copies named untracked files or directories in from the source. Under `snapshot`
+those files are already present, so `--carry` is a harmless no-op — the same
+command line works under either mode.
+
+**`snapshot` copies everything, including what you ignore.** `shutil.copytree`
+brings `.git`, tracked, untracked, and ignored files across, which is what makes
+the replica runnable and preserves the true `origin` and full history. The cost is
+that a repo with a 900 MB `node_modules/` copies 900 MB. Use `--exclude <glob>`
+(repeatable, snapshot only) to skip those paths; nothing is excluded by default.
+A dirty source is fine under `snapshot` — it is never touched, so `--allow-dirty`
+is only meaningful for `--isolate none`.
+
+**A snapshot is a replica, not a sandbox.** It contains your `.env`, credentials
+files, ignored build output and `.git/config`, and the agents run with your full
+OS permissions and inherited git credentials. It protects your working copy, not
+your secrets or your remote.
+
+**Pushing.** Duet never pushes and never merges, in any mode. Under `snapshot` the
+replica keeps your real `origin`, so a `git push` from the workspace *would* reach
+your remote — that is deliberate, so a finished branch can be published from the
+replica, but it means the replica is isolated from your *working copy*, not from
+your remote. Review before you push:
+
+```bash
+git -C <workspace> log <branch>
+git -C <workspace> diff main...<branch>
+```
+
+The workspace path, branch, and a reminder that the source is unmodified are all
+printed at the end of the run. Worktrees are kept for inspection (with a cleanup
+command); `--rollback-on-failure` removes both worktree and branch. Snapshots have
+nothing to roll back — the source never changed — so the replica is simply left in
+place for you to inspect or discard.
+
+## Commit modes
+
+By default the Broker commits the whole workspace after each turn, authored by the
+agent that spoke. Pass `--commit-mode agent-driven` and Duet injects **no commits
+at all**; instead each agent subprocess is spawned with `GIT_AUTHOR_NAME` /
+`GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` set to that
+agent's name and `<agent>@duet.local`, so the commits it makes itself carry its
+identity.
+
+```bash
+duet run --repo ./app --isolate snapshot --commit-mode agent-driven \
+  "Split the migration into three reviewable commits, conventional-commit messages"
+```
+
+Use it when the task has its own required commit sequence and exact messages: a
+per-turn `Claude turn` squash would bury or mis-message them. The tradeoff is that
+nothing auto-commits — if an agent leaves the tree dirty, the transcript says so
+rather than papering over it.
+
+Both options follow Duet's precedence chain, so they can be set once per project:
+
+    CLI flag  >  DUET_ISOLATE / DUET_COMMIT_MODE  >  duet.toml [session]  >  default
+
+```toml
+[session]
+isolate = "snapshot"
+commit_mode = "agent-driven"
+```
+
+`connect` and `resume` always run against the real repo. They reattach live Claude
+and Codex CLI sessions, which cannot be resumed into a replica directory they have
+never seen, so they ignore an `isolate` default and stay in place.
 
 ## Cost tracking and budgets
 
 Agents that report spend (Claude Code's JSON output includes
 `total_cost_usd`; configured via `cost_json_path`) have per-turn cost recorded
-in the transcript and summed in the summary. `--budget-usd X` (or
-`[session] budget_usd`) halts the session once reported spend reaches the cap
-— resumable exactly like a quota halt. Codex CLI reports no cost, so the cap
-tracks reported costs only; turn/wallclock caps remain the backstop.
+in the transcript and summed in the summary. A turn whose agent reports no
+usable cost (Codex CLI, or a malformed value) is recorded as **unknown**, never
+as zero, and the summary says how many turns were unknown. Reported costs are
+client-side estimates, not a bill.
+
+`--budget-usd X` (or `[session] budget_usd`) stops admitting new turns once
+reported spend reaches the cap. Completion is checked first, so the turn that
+finishes the task is recognised even if it also spent the budget. The halt is
+resumable exactly like a quota halt. Because unknown costs cannot be counted,
+the cap is best-effort for agents that report nothing, and the run notes this.
+Turn and wallclock caps remain the backstop; the wallclock deadline also bounds
+each turn's timeout.
 
 `duet ps` lists recent runs on the machine (from `~/.local/state/duet`), with
-live status (running / success / halted / died) and reported cost.
+live status (running / an outcome / died) and reported cost (`+?` marks unknown
+turns).
 
 ## When an agent runs out of usage limit
 
@@ -222,16 +387,26 @@ usage-limit signals) and handled per the `--on-quota` policy, configurable in
   printed — when the limit resets, `duet connect` resumes both agents with
   full context.
 - **`solo`**: drop the exhausted agent from the rotation and let the surviving
-  agent finish alone. The transcript records a note that the partner's
-  review/verification is pending, and success no longer waits for the dropped
-  agent to have spoken.
+  agent continue alone. The dropped partner's review is still owed: if the
+  survivor changed anything after the partner's last turn, the best possible
+  outcome is `review_pending`, never `success`. Resume when the limit resets to
+  obtain the review.
 - **`wait`**: sleep `--quota-wait-seconds` (default 300) and retry the same
   agent, as long as the next wait still fits inside the wallclock budget;
   otherwise halt with the same resumable state as `halt`.
 
+Failures are classified before any policy applies. Authentication problems
+(`AuthFailed`), billing blocks (`BillingBlocked`), unavailable models
+(`ModelUnavailable`), timeouts, and oversized output halt with their own stop
+condition. They are never retried as if they were rate limits, and Duet never
+switches to paid usage or another account on its own. Quota detection reads
+the failed CLI's error text, so it is a suspicion, not a reading of your
+balance.
+
 `duet doctor` (run automatically before headless sessions) does an
 authenticated round-trip per agent, so a limit that is already exhausted
-aborts the run before any turns are spent.
+aborts the run before any turns are spent. Probes run on a copy of each agent,
+so a probe's throwaway session is never saved for `resume`.
 
 ### Resuming after the limit resets
 
@@ -272,16 +447,24 @@ does not destroy its session: the transcript stays on disk and `duet connect`,
 
 ## Production hardening
 
-- Subprocess timeouts with process-tree kill for agents, and a bounded timeout
-  for the pytest verifier so a hanging test cannot wedge the session.
-- Git failures are surfaced as clean halts, not crashes; agent/verifier output
-  stored in transcripts is size-bounded to protect memory.
+- Agents and verifiers run in their own process group with bounded output:
+  capture keeps a head and tail window, so a flooding child cannot grow Duet's
+  memory. On timeout or interrupt the whole tree gets SIGTERM, then SIGKILL,
+  including grandchildren that outlived their parent. A background process
+  holding the output pipe cannot hang a turn.
+- Git failures are surfaced as clean halts, not crashes.
 - The workspace lock records its PID and is reclaimed automatically if the
-  owning process has died; SIGINT/SIGTERM trigger a graceful shutdown that
-  releases the lock and honors rollback intent.
-- Malformed config files fail fast with a clear `ConfigError`.
+  owning process has died. SIGINT/SIGTERM stop scheduling, save the transcript
+  and resume manifest (`interrupted`), release the lock, and honour rollback
+  intent.
+- Malformed or out-of-range config values (non-integer turns, negative or
+  non-finite budgets, …) fail fast with a clear `ConfigError`.
+- Built-in defaults ship inside the package, so wheel installs work without a
+  source checkout.
+- Running as root disables only agents configured with a permission-bypass flag
+  (Claude Code refuses bypass mode as root); other agents still run.
 
-Config precedence is deterministic: `--config PATH`, then `./duet.toml`, then `$XDG_CONFIG_HOME/duet/config.toml` or `~/.config/duet/config.toml`, then the built-in detected defaults.
+Config precedence is deterministic: `--config PATH`, then `./duet.toml`, then `$XDG_CONFIG_HOME/duet/config.toml` or `~/.config/duet/config.toml`, then the packaged defaults (`duet/resources/default_config.toml`).
 
 ## Design Decisions
 
@@ -289,7 +472,7 @@ Sequential turns are the concurrency-safety model. Duet never runs Claude and Co
 
 Git is the audit trail. Duet initializes the workspace as a git repository, sets repo-local committer identity, and commits after each turn with the active agent as author.
 
-Termination is execution-grounded when a verifier is configured. For coding tasks, `PytestVerifier` runs `pytest -q` after every turn; passing tests can stop the session without trusting an agent's claim.
+Termination is execution-grounded when a verifier is configured, and only then can a run report `success`. Checks run at baseline and after every turn; a red-to-green transition, or passing checks plus an agent's completion claim, ends the session.
 
 The engine/interface split is deliberate. The REPL, headless `run/exec`, and a future MCP peer-consult server are thin front-ends over the same broker API.
 
@@ -299,7 +482,7 @@ The runtime core has zero third-party dependencies. `pytest` is only a developme
 
 ## Stop Policy
 
-Duet checks these conditions after every turn: `VerifierStop`, `ControlToken`, `MaxTurns`, `WallClockBudget`, and `LoopDetector`. The final summary reports the outcome and the condition that fired.
+Before each turn Duet admits it only if the wallclock and budget allow. After each turn it checks `VerifierStop`, `ControlToken`, `MaxTurns`, `WallClockBudget`, and `LoopDetector`, in that order. The final summary reports the outcome, the condition that fired, the baseline and final verification, and the cost with its unknown turns.
 
 ## Limitations
 

@@ -49,7 +49,8 @@ def test_ping_pong_order_and_handoff_stripping(tmp_path):
     )
     assert [m.agent for m in session.transcript.messages] == ["claude", "codex"]
     assert "[[HANDOFF]]" not in session.transcript.messages[0].content
-    assert session.outcome == "success"
+    # No verifier: the [[DONE]] is reported, not verified (D-002).
+    assert session.outcome == "unverified"
     assert session.stop_condition == "ControlToken([[DONE]])"
 
 

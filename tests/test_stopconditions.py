@@ -47,10 +47,11 @@ def test_wallclock_fires():
     assert decision.should_stop
 
 
-def test_done_control_token_fires_success():
+def test_done_control_token_alone_is_only_a_claim():
+    # D-002: [[DONE]] without verification can never be reported as success.
     decision = ControlToken().check(control_token="DONE")
     assert decision.should_stop
-    assert decision.outcome == "success"
+    assert decision.outcome == "unverified"
 
 
 def test_loop_detector_similarity_math_and_fire():

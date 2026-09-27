@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import os
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from .logging_setup import get_logger
+from .providers.process import run_bounded
 
 log = get_logger()
+
+# Verifier output is evidence, not an archive: keep a bounded window.
+MAX_VERIFIER_OUTPUT = 1024 * 1024
 
 
 @dataclass(frozen=True)
 class VerificationResult:
-    status: str
+    status: str  # passed | failed | unknown
     success: bool
     output: str
 
@@ -32,9 +36,34 @@ class AlwaysUnknown:
         return VerificationResult("unknown", False, "No verifier configured.")
 
 
+def _run_check(argv: list[str], workspace: Path, timeout_seconds: int, label: str) -> VerificationResult:
+    """Run one check with bounded output and whole-tree termination on timeout,
+    so a hanging test (or a grandchild holding the pipes) cannot wedge the
+    session."""
+    try:
+        proc = run_bounded(
+            argv,
+            cwd=workspace,
+            timeout=timeout_seconds,
+            max_stdout=MAX_VERIFIER_OUTPUT,
+            max_stderr=MAX_VERIFIER_OUTPUT,
+        )
+    except OSError as exc:
+        log.warning("%s could not be executed: %s", label, exc)
+        return VerificationResult("unknown", False, f"{label} could not be executed: {exc}")
+    output = (proc.stdout + proc.stderr).strip()
+    if proc.timed_out:
+        log.warning("%s timed out after %ss", label, timeout_seconds)
+        return VerificationResult(
+            "failed", False, f"{label} timed out after {timeout_seconds}s (treated as failing).\n{output}".strip()
+        )
+    return VerificationResult("passed" if proc.returncode == 0 else "failed", proc.returncode == 0, output)
+
+
 class CommandVerifier:
-    """Run an arbitrary shell command in the workspace; exit 0 is a pass.
-    This is how non-Python stacks (jest, cargo, go test, tsc, lint) verify."""
+    """Run a user-approved shell command in the workspace; exit 0 is a pass.
+    This is how non-Python stacks (jest, cargo, go test, tsc, lint) verify.
+    The command comes from the user's CLI/config, never from agent output."""
 
     def __init__(self, command: str, timeout_seconds: int = 600) -> None:
         self.command = command
@@ -42,24 +71,8 @@ class CommandVerifier:
         self.name = f"cmd:{command}"
 
     def verify(self, workspace: Path) -> VerificationResult:
-        try:
-            proc = subprocess.run(
-                self.command,
-                shell=True,
-                cwd=workspace,
-                text=True,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            captured = (exc.stdout or "") + (exc.stderr or "")
-            return VerificationResult(
-                "failed", False, f"{self.command!r} timed out after {self.timeout_seconds}s.\n{captured}".strip()
-            )
-        except OSError as exc:
-            return VerificationResult("unknown", False, f"{self.command!r} could not be executed: {exc}")
-        output = (proc.stdout + proc.stderr).strip()
-        return VerificationResult("passed" if proc.returncode == 0 else "failed", proc.returncode == 0, output)
+        shell = ["cmd", "/c", self.command] if os.name == "nt" else ["/bin/sh", "-c", self.command]
+        return _run_check(shell, workspace, self.timeout_seconds, repr(self.command))
 
 
 class CompositeVerifier:
@@ -78,7 +91,7 @@ class CompositeVerifier:
             outputs.append(f"[{verifier.name}: {result.status}]\n{result.output}")
             if result.status == "failed":
                 worst = "failed"
-            elif result.status == "unknown" and worst != "failed":
+            elif result.status != "passed" and worst != "failed":
                 worst = "unknown"
         return VerificationResult(worst, worst == "passed", "\n\n".join(outputs))
 
@@ -116,24 +129,14 @@ class PytestVerifier:
         if shutil.which("pytest") is None:
             log.warning("pytest not found on PATH; cannot verify")
             return VerificationResult("unknown", False, "pytest not found on PATH; install it to enable verification.")
-        try:
-            proc = subprocess.run(
-                ["pytest", "-q"],
-                cwd=workspace,
-                text=True,
-                capture_output=True,
-                timeout=self.timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            log.warning("pytest timed out after %ss", self.timeout_seconds)
-            captured = (exc.stdout or "") + (exc.stderr or "")
-            return VerificationResult(
-                "failed",
-                False,
-                f"pytest timed out after {self.timeout_seconds}s (treated as failing).\n{captured}".strip(),
-            )
-        except OSError as exc:
-            log.warning("pytest could not be executed: %s", exc)
-            return VerificationResult("unknown", False, f"pytest could not be executed: {exc}")
-        output = (proc.stdout + proc.stderr).strip()
-        return VerificationResult("passed" if proc.returncode == 0 else "failed", proc.returncode == 0, output)
+        result = _run_check(["pytest", "-q"], workspace, self.timeout_seconds, "pytest")
+        if result.status == "failed" and _no_tests_collected(result.output):
+            # pytest exits 5 when nothing was collected: that is not a pass, and
+            # not evidence of a failure either.
+            return VerificationResult("unknown", False, f"pytest collected no tests.\n{result.output}".strip())
+        return result
+
+
+def _no_tests_collected(output: str) -> bool:
+    lowered = output.lower()
+    return "no tests ran" in lowered or "collected 0 items" in lowered
