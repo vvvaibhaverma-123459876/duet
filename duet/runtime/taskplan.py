@@ -154,9 +154,10 @@ class ProgressSample:
 @dataclass(frozen=True)
 class FailureRecord:
     """A failed attempt on a task: a failed required check or a blocking
-    review. `signature` identifies the failure (check id + status + output
-    hash, or the normalised finding summary) so repeats of the same failed
-    hypothesis are recognised."""
+    review. `signature` identifies the failure (check id + status + exit code
+    + a hash of the check output with temporary paths and timings removed, or
+    the normalised finding summary) so repeats of the same failed hypothesis
+    are recognised and different failures are not."""
 
     task_id: str
     snapshot_id: str

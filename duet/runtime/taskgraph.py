@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import threading
 from collections import deque
 from dataclasses import asdict
@@ -48,6 +49,7 @@ from .contracts import (
 from .taskplan import (
     ACTIVE,
     MAX_ACTIVE_CLAIMS,
+    MAX_TASKS_PER_RUN,
     WRITE_KINDS,
     FailureRecord,
     GraphState,
@@ -73,7 +75,8 @@ class TaskGraph:
         self._lock = threading.RLock()
         self._samples: dict[str, deque] = {}
         self._counter = 0
-        self._nudged: set[tuple[str, str, str]] = set()
+        self._nudged: set[tuple[str, str, str, int]] = set()
+        self._claim_locks: dict[str, threading.Lock] = {}
 
     # ------------------------------------------------------------------ state
 
@@ -137,13 +140,16 @@ class TaskGraph:
             raise ValidationError("tasks must be a list of task objects")
         specs = [TaskSpec.from_dict(t) for t in tasks]
         peer = self.co._peer_id(principal)  # a shared plan needs someone to accept it
-        tx = self.rt.store.read()
-        if tx.scalar("SELECT COUNT(*) FROM plans WHERE run_id = ? AND state = 'PROPOSED'", (run_id,)):
-            raise PolicyDenied("another plan is waiting for a decision; decide or withdraw it first")
-        scheduler.validate_plan(self.graph_state(run_id), specs, proposer=principal.id)
         plan_id = new_id("pln")
+        # The one-pending-plan rule and the bounds are checked in the same
+        # write transaction that records the plan (BEGIN IMMEDIATE serialises
+        # writers across threads and processes), so two concurrent proposals
+        # cannot both pass them.
         with self.rt.store.transaction() as wtx:
             self.rt._live_run(wtx, run_id)
+            if wtx.scalar("SELECT COUNT(*) FROM plans WHERE run_id = ? AND state = 'PROPOSED'", (run_id,)):
+                raise PolicyDenied("another plan is waiting for a decision; decide or withdraw it first")
+            scheduler.validate_plan(self.graph_state(run_id), specs, proposer=principal.id)
             wtx.emit(self.rt._event("plan.proposed", {"plan_id": plan_id, "run_id": run_id, "proposer": principal.id, "rationale": rationale, "tasks": [s.to_dict() for s in specs]}, principal, run_id))
         lines = [f"Plan {plan_id} proposed by {principal.provider}: {rationale or '(no rationale given)'}"]
         for spec in specs:
@@ -166,49 +172,107 @@ class TaskGraph:
             raise NotFound(f"no plan {plan_id} in this run")
         if plan["state"] != "PROPOSED":
             raise InvalidTransition(f"plan {plan_id} is already {plan['state']}")
-        if decision == "withdraw":
-            if plan["proposer"] != principal.id:
-                raise Unauthorized("only the proposer can withdraw a plan")
-            self._decide(run_id, plan_id, "WITHDRAWN", principal, reason, [])
-            return {"plan_id": plan_id, "state": "WITHDRAWN"}
-        if plan["proposer"] == principal.id:
+        if decision == "withdraw" and plan["proposer"] != principal.id:
+            raise Unauthorized("only the proposer can withdraw a plan")
+        if decision != "withdraw" and plan["proposer"] == principal.id:
             raise Unauthorized("a plan is accepted or rejected by the other participant, not its proposer")
+        state = {"accept": "ACCEPTED", "reject": "REJECTED", "withdraw": "WITHDRAWN"}[decision]
+        ids = self._decide(run_id, plan_id, state, principal, reason)
+        if decision == "withdraw":
+            return {"plan_id": plan_id, "state": state}
         if decision == "reject":
-            self._decide(run_id, plan_id, "REJECTED", principal, reason, [])
-            proposer = self.rt.store.read().require("participants", plan["proposer"])
-            self.co._status(run_id, proposer["participant_id"], f"Plan {plan_id} was rejected by {principal.provider}: {reason or '(no reason)'}")
+            # While a task waits for a re-plan the proposer has to act on a
+            # rejection (a managed peer takes a turn for a BLOCKER only).
+            kind = MessageKind.BLOCKER if self._replan_blocked(run_id) else MessageKind.STATUS
+            self.co._status(run_id, plan["proposer"], f"Plan {plan_id} was rejected by {principal.provider}: {reason or '(no reason)'}", kind=kind)
             self.co.notify()
             self.observe(run_id, "review")
-            return {"plan_id": plan_id, "state": "REJECTED"}
+            return {"plan_id": plan_id, "state": state}
+        self._unblock_after_replan(run_id, plan_id)
+        # Actionable for the proposer: its plan's tasks now exist, and after a
+        # re-plan the blocked task is claimable again. A STATUS would not wake
+        # a managed proposer, and nothing else would.
+        self.co._status(
+            run_id, plan["proposer"],
+            f"Plan {plan_id} accepted by {principal.provider}; tasks: " + ", ".join(f"{k}={v}" for k, v in ids.items())
+            + ". duet_status lists what to do next.",
+            kind=MessageKind.TASK_PROPOSAL,
+        )
+        self.co.notify()
+        self.co.try_complete(run_id)  # the plan is a contribution; the predicate may hold now
+        self.observe(run_id, "review")
+        self.nudge(run_id)
+        return {"plan_id": plan_id, "state": state, "tasks": ids}
+
+    def _decide(self, run_id: str, plan_id: str, state: str, principal: Principal, reason: str) -> dict[str, str]:
+        """Record a plan decision, and for an acceptance create the plan's
+        tasks and the proposer's contribution, in one write transaction that
+        re-checks the plan is still PROPOSED and re-validates it against the
+        graph as it is now. Two racing decisions therefore cannot both take
+        effect (no duplicated tasks), and a plan withdrawn or rejected
+        meanwhile adds nothing; this holds across processes, not only threads.
+        Returns plan key -> created task id."""
+        ids: dict[str, str] = {}
+        with self.rt.store.transaction() as tx:
+            self.rt._live_run(tx, run_id)
+            plan = tx.require("plans", plan_id)
+            if plan["state"] != "PROPOSED":
+                raise InvalidTransition(f"plan {plan_id} is already {plan['state']}")
+            if state == "ACCEPTED":
+                ids = self._create_plan_tasks(tx, run_id, plan, principal)
+                self._contribution(tx, run_id, plan["proposer"], "plan", plan_id, f"accepted plan with {len(ids)} task(s)")
+            tx.emit(self.rt._event("plan.decided", {"plan_id": plan_id, "state": state, "decided_by": principal.id, "reason": reason, "created_task_ids": list(ids.values())}, principal, run_id))
+        return ids
+
+    def _create_plan_tasks(self, tx: Any, run_id: str, plan: dict, decider: Principal) -> dict[str, str]:
+        """The events `Runtime.propose_task` and `transition_task` would emit
+        (a participant's PROPOSED task, then the controller's move to READY),
+        emitted inside the caller's transaction; those methods open their own.
+        `validate_plan` has already checked what they would: acceptance ids,
+        dependencies and parents within this run, bounds and cycles."""
         specs = [TaskSpec.from_dict(t) for t in json.loads(plan["tasks_json"])]
         resolved = scheduler.validate_plan(self.graph_state(run_id), specs, proposer=plan["proposer"])  # the graph may have changed
-        proposer_row = self.rt.store.read().require("participants", plan["proposer"])
+        proposer_row = tx.require("participants", plan["proposer"])
         proposer = Principal("participant", proposer_row["participant_id"], run_id=run_id, provider=proposer_row["provider"])
         ids: dict[str, str] = {}
         for entry in resolved:
             spec = entry.spec
-            task = self.rt.propose_task(
-                proposer, description=spec.description, deliverables=list(spec.deliverables), acceptance_ids=list(spec.acceptance_ids),
-                depends_on=[ids.get(d, d) for d in entry.depends_on], parent_id=ids.get(entry.parent, entry.parent) if entry.parent else None,
-                kind=spec.kind,
-            )
-            task = self.rt.transition_task(CONTROLLER, task["task_id"], TaskState.READY, expected_version=task["state_version"], reason=f"plan {plan_id} accepted by {principal.provider}")
-            ids[spec.key] = task["task_id"]
-        self._decide(run_id, plan_id, "ACCEPTED", principal, reason, list(ids.values()))
-        self.record_contribution(run_id, plan["proposer"], "plan", plan_id, f"accepted plan with {len(ids)} task(s)")
-        self._unblock_after_replan(run_id, plan_id)
-        self.co._status(run_id, plan["proposer"], f"Plan {plan_id} accepted by {principal.provider}; tasks: " + ", ".join(f"{k}={v}" for k, v in ids.items()))
-        self.co.notify()
-        self.observe(run_id, "review")
-        self.nudge(run_id)
-        return {"plan_id": plan_id, "state": "ACCEPTED", "tasks": ids}
+            task_id = new_id("tsk")
+            tx.emit(self.rt._event("task.proposed", {
+                "task_id": task_id, "run_id": run_id, "parent_id": ids.get(entry.parent, entry.parent) if entry.parent else None,
+                "description": spec.description, "deliverables": list(spec.deliverables), "acceptance_ids": list(spec.acceptance_ids),
+                "depends_on": [ids.get(d, d) for d in entry.depends_on], "required": bool(spec.acceptance_ids),
+                "state": TaskState.PROPOSED.value, "proposed_by": proposer.id, "kind": spec.kind,
+            }, proposer, run_id))
+            tx.emit(self.rt._event("task.transition", {
+                "task_id": task_id, "from": TaskState.PROPOSED.value, "to": TaskState.READY.value,
+                "reason": f"plan {plan['plan_id']} accepted by {decider.provider}", "blocked_reason": None, "next_action": None,
+                "bump_revision": False, "owner": None,
+            }, CONTROLLER, run_id))
+            ids[spec.key] = task_id
+        return ids
 
-    def _decide(self, run_id: str, plan_id: str, state: str, principal: Principal, reason: str, created: list[str]) -> None:
-        with self.rt.store.transaction() as tx:
-            self.rt._live_run(tx, run_id)
-            tx.emit(self.rt._event("plan.decided", {"plan_id": plan_id, "state": state, "decided_by": principal.id, "reason": reason, "created_task_ids": created}, principal, run_id))
+    def _replan_blocked(self, run_id: str) -> bool:
+        return any(
+            t["state"] == TaskState.BLOCKED.value and (t.get("blocked_reason") or "").startswith("re-plan required")
+            for t in self.rt.tasks(CONTROLLER, run_id)
+        )
 
     # ------------------------------------------------------------------ claims and results
+
+    def claim(self, principal: Principal, task: dict) -> dict:
+        """`check_claim`, then the runtime claim, under the run's claim lock:
+        the active-claim bound is a count read before the claim commits, so
+        two concurrent claims by one participant could otherwise both pass
+        it. Participant operations run only in the DUET service (one per
+        state directory, held by a file lock), so a process lock suffices."""
+        with self._claim_lock(principal.run_id or ""):
+            self.check_claim(principal, task)
+            return self.rt.claim_task(principal, task["task_id"], expected_version=task["state_version"])["task"]
+
+    def _claim_lock(self, run_id: str) -> threading.Lock:
+        with self._lock:
+            return self._claim_locks.setdefault(run_id, threading.Lock())
 
     def check_claim(self, principal: Principal, task: dict) -> None:
         """Invalid claims are rejected here, before the runtime's own checks
@@ -250,9 +314,9 @@ class TaskGraph:
             ws = self.co.workspace(run_id)
             self.co.workspaces.check_writer(ws, principal.id, self.co._writer_fence(ws, principal.id))
             snap = capture_snapshot(ws.path, base_sha=ws.base_sha, store=self.co.artifacts)
-            snapshot_id = self.co.evidence.record_snapshot(CONTROLLER, run_id, snap, author=principal.id)["snapshot_id"]
-            if snap.changed:
-                self.record_contribution(run_id, principal.id, "code", snapshot_id, f"changed {', '.join(list(snap.changed)[:5])}")
+            row = self.co.evidence.record_snapshot(CONTROLLER, run_id, snap, author=principal.id)
+            snapshot_id = row["snapshot_id"]
+            self.credit_code(run_id, principal.id, row)
         artifact_ref = self.co.artifacts.put_text(artifact) if artifact else None
         result_id = new_id("res")
         with self.rt.store.transaction() as tx:
@@ -301,6 +365,9 @@ class TaskGraph:
             self.record_contribution(run_id, result["author"], task["kind"], task_id, result["summary"][:300])
             self.record_contribution(run_id, principal.id, "review", result["result_id"], f"accepted {task_id}")
             self.co._status(run_id, result["author"], f"Task {task_id} accepted by {principal.provider}.")
+            # A required task verified after the main snapshot was approved
+            # may be the last missing obligation; nothing else re-evaluates.
+            self.co.try_complete(run_id)
         else:
             self.rt.transition_task(CONTROLLER, task_id, TaskState.CHANGES_REQUESTED, expected_version=fresh["state_version"], reason=f"rejected by {principal.provider}: {reason}"[:500])
             self.record_contribution(run_id, principal.id, "review", result["result_id"], f"rejected {task_id}: {reason[:200]}")
@@ -331,6 +398,7 @@ class TaskGraph:
             raise PolicyDenied("only the writer can hand the role over; you can take it over only if the writer is unavailable")
         settings = self.co.settings(run_id)
         if outgoing is not None:
+            self._capture_outgoing(run_id, outgoing)
             for task in self.rt.tasks(CONTROLLER, run_id):
                 if task["owner"] == outgoing and task["kind"] in WRITE_KINDS and task["state"] in ACTIVE:
                     self.rt.transition_task(CONTROLLER, task["task_id"], TaskState.READY, expected_version=task["state_version"], reason="writer role handed over")
@@ -346,15 +414,45 @@ class TaskGraph:
         self.nudge(run_id)
         return {"writer": incoming, "workspace": settings.workspace_path}
 
+    def _capture_outgoing(self, run_id: str, outgoing: str) -> None:
+        """Record the workspace as the outgoing writer leaves it, authored by
+        them. Snapshot ids are per tree and a tree's first recorder is its
+        author, so without this the next writer submitting the same files
+        would become their author: it would get the code contribution, and
+        the real author's approval would pass as a non-author review."""
+        from ..verification.evidence import snapshot_id_for
+        from ..workspaces.snapshots import capture_snapshot
+
+        ws = self.co.workspace(run_id)
+        snap = capture_snapshot(ws.path, base_sha=ws.base_sha, store=self.co.artifacts)
+        if not snap.changed or self.rt.store.read().get("snapshots", snapshot_id_for(run_id, snap.tree_hash)) is not None:
+            return  # nothing authored, or this tree is already recorded (with its author)
+        self.credit_code(run_id, outgoing, self.co.evidence.record_snapshot(CONTROLLER, run_id, snap, author=outgoing))
+
     # ------------------------------------------------------------------ contributions
 
+    def credit_code(self, run_id: str, participant_id: str, snapshot: dict) -> None:
+        """A `code` contribution for a recorded snapshot, only for its stored
+        author: the participant whose workspace first produced that tree
+        (every change of writer records the outgoing writer's tree first).
+        Submitting files someone else produced earns nothing; a tree its
+        author recorded first differs from every earlier capture, so the
+        credit is always for changes of their own."""
+        changed = json.loads(snapshot["changed_json"])
+        if snapshot["author"] != participant_id or not changed:
+            return
+        self.record_contribution(run_id, participant_id, "code", snapshot["snapshot_id"], f"changed {', '.join(changed[:5])}")
+
     def record_contribution(self, run_id: str, participant_id: str, kind: str, ref: str, summary: str) -> None:
-        cid = contribution_id(run_id, participant_id, kind, ref)
         with self.rt.store.transaction() as tx:
-            if tx.get("contributions", cid) is not None:
-                return
-            provider = tx.require("participants", participant_id)["provider"]
-            tx.emit(self.rt._event("contribution.recorded", {"contribution_id": cid, "run_id": run_id, "participant_id": participant_id, "provider": provider, "kind": kind, "ref": ref, "summary": summary[:500]}, CONTROLLER, run_id))
+            self._contribution(tx, run_id, participant_id, kind, ref, summary)
+
+    def _contribution(self, tx: Any, run_id: str, participant_id: str, kind: str, ref: str, summary: str) -> None:
+        cid = contribution_id(run_id, participant_id, kind, ref)
+        if tx.get("contributions", cid) is not None:
+            return
+        provider = tx.require("participants", participant_id)["provider"]
+        tx.emit(self.rt._event("contribution.recorded", {"contribution_id": cid, "run_id": run_id, "participant_id": participant_id, "provider": provider, "kind": kind, "ref": ref, "summary": summary[:500]}, CONTROLLER, run_id))
 
     def contributions(self, run_id: str) -> list[dict]:
         return [dict(r) for r in self.rt.store.read().query("SELECT * FROM contributions WHERE run_id = ? ORDER BY created_at, rowid", (run_id,))]
@@ -363,7 +461,10 @@ class TaskGraph:
 
     def nudge(self, run_id: str) -> None:
         """Tell idle participants which ready task the scheduler assigns them
-        (a controller TASK_PROPOSAL), once per participant and task."""
+        (a controller TASK_PROPOSAL), once per participant and task version:
+        a task that becomes claimable again (unblocked after a re-plan, put
+        back by a handoff, reopened) has a new state version and is
+        suggested again, otherwise a managed peer would never be woken for it."""
         try:
             state = self.graph_state(run_id)
             if RunLifecycle(self.rt.get_run(CONTROLLER, run_id)["lifecycle"]) in TERMINAL_RUN:
@@ -376,13 +477,13 @@ class TaskGraph:
                 continue
             if any(t.owner == pid and t.state in ACTIVE for t in state.tasks.values()):
                 continue
-            key = (run_id, pid, task_id)
+            task = state.tasks[task_id]
+            row = self.rt.store.read().require("tasks", task_id)
+            key = (run_id, pid, task_id, row["state_version"])
             with self._lock:
                 if key in self._nudged:
                     continue
                 self._nudged.add(key)
-            task = state.tasks[task_id]
-            row = self.rt.store.read().require("tasks", task_id)
             self.co._status(
                 run_id, pid,
                 f"Suggested next task for you: {task_id} ({task.kind}): {row['description'][:300]}\nClaim it with duet_claim(task_id='{task_id}').",
@@ -432,6 +533,15 @@ class TaskGraph:
         if verdict.status == "replan":
             if replans and replans[-1]["task_id"] == verdict.task_id and not self._plan_accepted_since(run_id, replans[-1]["created_at"]):
                 return {"status": "replan"}  # already waiting for the new plan
+            count = len(self.graph_state(run_id).tasks)
+            if count >= MAX_TASKS_PER_RUN:
+                # Only an accepted plan lifts a re-plan block, and a full graph
+                # accepts no plan (validate_plan): the block would be permanent.
+                reason = (
+                    f"task {verdict.task_id} keeps failing and needs a re-plan, but the run already holds {count} tasks "
+                    f"(the limit is {MAX_TASKS_PER_RUN}), so no new plan can be accepted"
+                )
+                return self._pause(run_id, reason, fingerprint, task_id=verdict.task_id, evidence=verdict.evidence)
             self._intervene(run_id, "replan", verdict.reason, verdict.task_id, verdict.evidence, fingerprint)
             if verdict.task_id:
                 self._block(run_id, verdict.task_id, f"re-plan required: {verdict.reason}")
@@ -496,11 +606,13 @@ class TaskGraph:
         main = self.co._main_task_id(run_id)
         records: list[tuple[str, FailureRecord]] = []
         for row in tx.query(
-            "SELECT e.snapshot_id, e.check_id, e.status, e.exit_code, e.ended_at FROM evidence e JOIN snapshots s ON s.snapshot_id = e.snapshot_id "
+            "SELECT e.snapshot_id, e.check_id, e.status, e.exit_code, e.ended_at, e.output_hash, e.artifact_ref FROM evidence e "
+            "JOIN snapshots s ON s.snapshot_id = e.snapshot_id "
             "WHERE e.run_id = ? AND e.status != 'passed' AND s.author IS NOT NULL AND e.ended_at > ? ORDER BY e.ended_at, e.rowid",
             (run_id, since),
         ):
-            records.append((row["ended_at"], FailureRecord(main, row["snapshot_id"], f"check:{row['check_id']}:{row['status']}:{row['exit_code']}", 0)))
+            signature = f"check:{row['check_id']}:{row['status']}:{row['exit_code']}:{self._output_digest(row)}"
+            records.append((row["ended_at"], FailureRecord(main, row["snapshot_id"], signature, 0)))
         for row in tx.query(
             "SELECT review_id, snapshot_id, summary, created_at FROM reviews WHERE run_id = ? AND disposition = 'changes_requested' AND created_at > ? ORDER BY created_at, rowid",
             (run_id, since),
@@ -515,6 +627,30 @@ class TaskGraph:
             records.append((row["updated_at"], FailureRecord(row["task_id"], row["result_id"], "result:" + _normalise(row["decision_reason"] or ""), 0)))
         records.sort(key=lambda item: item[0])
         return [FailureRecord(r.task_id, r.snapshot_id, r.signature, i + 1) for i, (_, r) in enumerate(records)]
+
+    def _output_digest(self, evidence: Any) -> str:
+        """Which failure a check reported, from its recorded output. Each check
+        runs in a fresh temporary copy of the snapshot, so the raw output (and
+        its `output_hash`) names a different directory in every traceback,
+        and test runners print timings: the same failure would never repeat.
+        Those parts are normalised away before hashing; the stored hash is
+        the fallback when the output cannot be read."""
+        output = ""  # an empty output is stored without an artifact
+        if evidence["artifact_ref"]:
+            try:
+                output = self.co.artifacts.get_bytes(evidence["artifact_ref"]).decode("utf-8", errors="replace")
+            except Exception:  # a missing artifact must not break loop control
+                return str(evidence["output_hash"]).removeprefix("sha256:")[:16]
+        return hashlib.sha256(_normalise_output(output).encode("utf-8")).hexdigest()[:16]
+
+
+_SCRATCH_TREE = re.compile(r"""[^\s"'()]*/check-[^/\s"']+/tree(?=[/\s"')]|$)""")
+_DURATION = re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|s|sec|secs|seconds)\b")
+_ADDRESS = re.compile(r"\b0x[0-9a-fA-F]{6,}\b")
+
+
+def _normalise_output(text: str) -> str:
+    return _ADDRESS.sub("0x?", _DURATION.sub("<t>", _SCRATCH_TREE.sub("<snapshot>", text)))
 
 
 def _normalise(text: str) -> str:
