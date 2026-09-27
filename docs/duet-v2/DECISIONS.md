@@ -338,8 +338,11 @@ validators. D04 code is unchanged.
 
 - A pool (`usage_pools`, migration 0005) is a user-defined allowance for one
   provider metric (`turns` or `cost.estimated_usd`), with an optional rolling
-  window. Only the user can define or change one (`duet usage pool set`), so
-  agents and the controller can never create or widen spending authority.
+  window. Only the user principal can define or change one (`duet usage pool
+  set`); agents and the controller cannot create or widen spending authority
+  through DUET. The protection is cooperative: the CLI writes the local
+  database as the user, so any process running as that OS user could do the
+  same (internal review, D08).
   Enforcement is `local_bound` (refuses), `best_effort` (reports only) or
   `provider_cap` (mirrors a provider-enforced limit).
 - The capacity check runs inside `plan_action`'s write transaction. SQLite's
@@ -360,3 +363,62 @@ validators. D04 code is unchanged.
 - A pool is not a view of the provider's own quota. A local reservation
   cannot lock provider-side capacity, and usage outside DUET is invisible
   here. Quota windows are observed gauges in `duet.usage`.
+
+## D-027: Completion-aware admission (D08)
+
+- Every managed turn is admitted in the same write transaction that plans
+  it (`ReservationBook.admit`). The pure `admission.decide()` compares, per
+  local_bound pool of the turn's own provider and metric: estimate +
+  outstanding reservations + remaining finishing reserves + a margin
+  (unknown-size records x the estimate) with allowance - used. Outstanding
+  and finishing reservations are both HELD rows, so one sum carries both.
+- Turns are classified by purpose: finishing (the review, repairs while the
+  task has changes requested), required (implementing the open task,
+  questions, blockers), optional (everything else). Optional work is deferred
+  first and never draws on a reserve. A refused required or finishing turn
+  pauses the run for the user (`PAUSED_BUDGET`); nothing is silently skipped.
+- Unknown quantities get a bounded policy, not a fictional inequality. A
+  turn of unknown size runs alone per pool while the pool has room, and
+  optional work waits for a measured turn. Without quota telemetry, optional
+  turns are capped per provider per run (12), on top of the run's
+  invocation cap.
+- Enforcement labels are per pool: provider_cap only when the provider
+  enforces the limit per call (Claude `--max-budget-usd`, money only);
+  local_bound for work DUET schedules; best_effort for tracking pools. A
+  pool that asks for a cap the provider cannot enforce pauses the run
+  (`PAUSED_APPROVAL`) before any work.
+
+## D-028: Finishing reserves (D08)
+
+- When the pair forms (and again at the first admission, if missing), DUET
+  reserves two review turns on the reviewer's provider and two repair turns
+  on the writer's, in each bounded pool of that provider. A native
+  participant gets no reserve: DUET does not schedule its turns. Cost
+  reserves are units x the current high estimate, resized after each turn,
+  and start at zero (with the size unknown) until a turn has been measured.
+  A reserve that cannot be fully held records its shortfall.
+- A finishing turn draws on its run's reserve for the same purpose and pool:
+  `action.planned` carries `draw_from`, and the reducer moves that quantity
+  from the reserve to the action's reservation, so it is held once. Only
+  the part the reserve does not cover is checked against free capacity. A
+  terminal run releases what is left.
+
+## D-029: Quota pauses and reset-aware resume (D08)
+
+- Quota readings (`quota.observed`) are provider windows as observed. An
+  older reading never replaces a newer one, and the previous level is kept
+  so a jump from use outside DUET is visible. Readings are compared with
+  thresholds only, never converted into turns or averaged.
+- A reading at 100%, or a quota or rate-limit failure, places a provider
+  hold. It resumes at the window's reset (plus a grace minute) or after a
+  bounded backoff of 5, 10, 20, 40, then 60 minutes. After the resume time,
+  a passive read (Codex `account/rateLimits/read`) can end the hold without
+  a model call. Otherwise exactly one real turn is admitted as the probe
+  while the others wait for its outcome.
+- The run pauses (`PAUSED_QUOTA`) only when the held participant owns the
+  current obligation and every other participant is managed. With a native
+  participant, the run stays active and the native session is told what is
+  pending and until when. The review stays required either way. The service
+  stays alive for `PAUSED_QUOTA` runs, and its monitor resumes them
+  (RECONCILING, then the state the main task implies).
+

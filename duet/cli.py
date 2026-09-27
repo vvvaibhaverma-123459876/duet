@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cli_v2.add_parsers(sub)
     cli_v2.add_usage_parser(sub)
-    cli_v2.extend_legacy(status, stop)
+    cli_v2.extend_legacy(status, stop, resume)
 
     init = sub.add_parser("init")
     scope = init.add_mutually_exclusive_group()

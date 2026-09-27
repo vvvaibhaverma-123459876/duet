@@ -144,6 +144,6 @@ def test_usage_cli_defines_and_reports(tmp_path):
     import json
 
     report = json.loads(shown.stdout)
-    assert report["schema"] == "duet.usage/1" and report["pools"][0]["available"] == "3"
+    assert report["schema"] == "duet.usage/2" and report["pools"][0]["available"] == "3" and report["quota"] == {"gauges": [], "holds": []}
     bad = subprocess.run([*run, "pool", "set", "x", "--provider", "codex", "--metric", "turns", "--allowance", "1.5", "--state-root", str(root)], capture_output=True, text=True, timeout=60)
     assert bad.returncode == 1 and "whole number" in bad.stderr

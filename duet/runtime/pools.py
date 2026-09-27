@@ -81,35 +81,70 @@ def pool_usage(tx: Tx, pool: dict, now: str | None = None) -> dict:
         else:
             used += Decimal(quantity)
     held = Decimal(0)
-    for row in tx.query("SELECT quantity_json FROM reservations WHERE pool = ? AND state = 'HELD'", (pool["pool_id"],)):
-        held += as_quantity(json.loads(row["quantity_json"]), "reservation quantity")
+    finishing = Decimal(0)
+    # A HELD reservation whose action already has a usage record in this pool
+    # is superseded by that record: counting both would take the same turn
+    # twice between recording usage and settling the action, or forever
+    # after a crash in between.
+    for row in tx.query(
+        "SELECT r.quantity_json, r.action_id FROM reservations r WHERE r.pool = ? AND r.state = 'HELD'"
+        " AND NOT EXISTS (SELECT 1 FROM usage_records u WHERE u.action_id = r.action_id AND u.pool_id = r.pool)",
+        (pool["pool_id"],),
+    ):
+        quantity = as_quantity(json.loads(row["quantity_json"]), "reservation quantity")
+        held += quantity
+        if row["action_id"] is None:
+            finishing += quantity
+    # Overshoot: finished actions that used more than they reserved (D08).
+    # Reported, never hidden; a local reservation cannot stop a running turn.
+    overshoot = Decimal(0)
+    # A turn admitted without a size estimate reserved nothing to overshoot.
+    for row in tx.query(
+        "SELECT quantity_json, actual_json FROM reservations WHERE pool = ? AND state = 'RECONCILED' AND actual_json IS NOT NULL"
+        " AND category != 'provider_turn:unknown_size'",
+        (pool["pool_id"],),
+    ):
+        actual = json.loads(row["actual_json"])
+        spent = actual.get("quantity") if isinstance(actual, dict) else None
+        if spent is not None:
+            overshoot += max(Decimal(str(spent)) - as_quantity(json.loads(row["quantity_json"]), "reservation quantity"), Decimal(0))
     allowance = _dec(pool["allowance_json"])
     available = None if allowance is None else allowance - used - held
     return {
         "pool_id": pool["pool_id"], "provider": pool["provider"], "metric": pool["metric"], "unit": pool["unit"],
         "enforcement": pool["enforcement"], "window_seconds": pool["window_seconds"],
         "allowance": None if allowance is None else str(allowance), "used": str(used), "held": str(held),
+        "finishing_held": str(finishing),
         "available": None if available is None else str(available),
         "unknown_records": unknown,
+        "overshoot": str(overshoot),
         # With unknown records the true consumption is higher than `used`:
         # `available` is then an upper bound, not a promise.
         "uncertain": unknown > 0,
     }
 
 
-def check_reservation(tx: Tx, pool_id: str, quantity: object, now: str | None = None) -> None:
+def check_reservation(tx: Tx, pool_id: str, quantity: object, now: str | None = None, *, provider: str | None = None, metric: str | None = None) -> None:
     """Called inside plan_action's transaction for each reservation. A pool
     that does not exist is not a limit (nothing was authorised or bounded);
-    a local_bound pool refuses a reservation it cannot cover."""
+    a local_bound pool refuses a reservation it cannot cover. The
+    reservation's provider and metric must be the pool's own: capacity of one
+    provider never funds another's work, and units never mix (D08)."""
     pool = tx.get("usage_pools", pool_id)
     if pool is None:
         return
+    if provider is not None and provider != pool["provider"]:
+        raise PolicyDenied(f"pool {pool_id} holds {pool['provider']} capacity; it cannot fund {provider} work", details={"pool": pool_id, "provider": provider})
+    if metric is not None and metric != pool["metric"]:
+        raise PolicyDenied(f"pool {pool_id} counts {pool['metric']}, not {metric}", details={"pool": pool_id, "metric": metric})
     requested = as_quantity(quantity, "reservation quantity")
     if pool["enforcement"] != "local_bound" or pool["allowance_json"] is None:
         return
     usage = pool_usage(tx, pool, now)
     available = Decimal(usage["available"])
-    if requested > available:
+    # A zero reservation (a turn of unknown size) still needs some room left:
+    # an exhausted pool, or a zero allowance, refuses it.
+    if requested > available or (requested == 0 and available <= 0):
         raise PolicyDenied(
             f"pool {pool_id} cannot cover {requested} {pool['unit']}: {usage['used']} used"
             f"{' in the window' if pool['window_seconds'] else ''}, {usage['held']} reserved, allowance {usage['allowance']}",

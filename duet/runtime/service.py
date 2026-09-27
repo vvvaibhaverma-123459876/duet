@@ -252,7 +252,7 @@ PARTICIPANT_OPS = frozenset(
         "handoff", "submit", "request_review", "request_profile", "status", "disconnect",
     }
 )
-CONTROLLER_OPS = frozenset({"pair", "run_status", "cancel", "runs", "shutdown"})
+CONTROLLER_OPS = frozenset({"pair", "run_status", "cancel", "resume", "runs", "shutdown"})
 OPEN_OPS = frozenset({"ping", "join"})
 
 PeerFactory = Callable[["RuntimeService", str, str], Any]  # (service, run_id, provider) -> started peer
@@ -304,6 +304,7 @@ class RuntimeService:
     def start(self) -> "RuntimeService":
         report = self.runtime.reconcile(CONTROLLER)
         self._settle_in_doubt_checks(report["in_doubt"])
+        self.coordinator.budget.settle_in_doubt_turns(report["in_doubt"])
         # Managed sessions do not survive their service: their drivers are
         # gone, so they must not keep looking connected.
         self._release_orphaned_managed_peers("the DUET service restarted; managed sessions are not relaunched automatically")
@@ -407,6 +408,7 @@ class RuntimeService:
             try:
                 self.coordinator.check_hosts()
                 self.coordinator.expire_overdue()
+                self.coordinator.budget.check_quota()  # reset-aware resume (D08)
                 seq = self.store.read().scalar("SELECT MAX(seq) FROM events") or 0
                 if seq != self._last_event_seq:
                     self._last_event_seq = seq
@@ -424,10 +426,15 @@ class RuntimeService:
             return time.monotonic() - self._last_activity
 
     def _live_runs(self) -> list[str]:
-        """Runs that keep the service alive: active ones. A paused run waits
-        for the user and does not."""
+        """Runs that keep the service alive: active ones, and runs paused for
+        quota (the service resumes them after the reset). Any other paused run
+        waits for the user and does not."""
         rows = self.store.read().query("SELECT run_id, lifecycle FROM runs")
-        return [r["run_id"] for r in rows if RunLifecycle(r["lifecycle"]) not in TERMINAL_RUN and not r["lifecycle"].startswith("PAUSED_")]
+        return [
+            r["run_id"] for r in rows
+            if RunLifecycle(r["lifecycle"]) not in TERMINAL_RUN
+            and (not r["lifecycle"].startswith("PAUSED_") or r["lifecycle"] == RunLifecycle.PAUSED_QUOTA.value)
+        ]
 
     # -- managed peers -------------------------------------------------------------------
 
@@ -558,6 +565,8 @@ class RuntimeService:
             return self.coordinator.run_status(_text(args, "run_id"))
         if op == "cancel":
             return self.coordinator.cancel(_text(args, "run_id"), reason=str(args.get("reason") or "stopped by the user")[:500], principal=USER)
+        if op == "resume":
+            return self.coordinator.budget.resume(_text(args, "run_id"), reason=str(args.get("reason") or "resumed by the user")[:500], principal=USER)
         if op == "pair":
             if self.peer_factory is None:
                 raise PolicyDenied("this service cannot launch managed peers")

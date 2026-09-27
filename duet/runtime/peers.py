@@ -8,9 +8,12 @@ uses (`duet mcp serve --token-file ...`), so there is one protocol for both.
 
 Every turn is a durable action (planned, claimed, recorded): a turn the
 service loses while it runs becomes IN_DOUBT and is never replayed blindly.
-Turns are capped by the run policy's `max_invocations`. Authentication,
-billing and quota failures stop the peer and mark it unavailable; nothing
-falls back to another account, provider or paid API (R13)."""
+Turns are capped by the run policy's `max_invocations`, and each one is
+admitted first (D08): its class (finishing review or repair, required work,
+optional work) decides what it may draw on, and a refusal defers or pauses
+it. Quota failures pause the peer until the provider's reset; authentication
+and billing failures stop it and mark it unavailable. Nothing falls back to
+another account, provider or paid API (R13)."""
 from __future__ import annotations
 
 import logging
@@ -27,9 +30,10 @@ from decimal import Decimal
 
 from ..adapters import AgentError, AuthError, BillingError, QuotaError
 from ..providers.base import ProviderAdapter, TurnRequest, TurnResult
-from .contracts import CONTROLLER, TERMINAL_RUN, ActionState, DomainError, Liveness, MessageKind, MessageState, PolicyDenied, RunLifecycle
+from .contracts import CONTROLLER, TERMINAL_RUN, ActionState, DomainError, Liveness, MessageKind, MessageState, RunLifecycle, TaskState
 from .pairing import MAX_WAIT_SECONDS, PairCoordinator, other_provider
 from .pools import PoolStore
+from ..usage.reservations import gauge_from_observation
 
 TURN_METRIC = "turns"
 COST_METRIC = "cost.estimated_usd"
@@ -37,12 +41,18 @@ COST_METRIC = "cost.estimated_usd"
 log = logging.getLogger("duet.peers")
 
 DEFAULT_TURN_TIMEOUT = 900.0
+POLL_SECONDS = 1.0
 FALLBACK_PREFIX = "[DUET: delivered from the end of the peer's turn because it did not reply with duet_send] "
 
 
-def _finished(lifecycle: str) -> bool:
-    """Terminal or paused: either way a managed peer stops taking turns."""
-    return RunLifecycle(lifecycle) in TERMINAL_RUN or lifecycle.startswith("PAUSED_")
+def _terminal(lifecycle: str) -> bool:
+    return RunLifecycle(lifecycle) in TERMINAL_RUN
+
+
+def _paused(lifecycle: str) -> bool:
+    """A paused run takes no turns, but its peers stay: a quota pause ends at
+    the provider's reset and a budget pause when the user resumes."""
+    return lifecycle.startswith("PAUSED_")
 
 
 ACTIONABLE_FROM_PEER = frozenset(
@@ -111,6 +121,9 @@ class ManagedPeer:
             handle.write(registered["token"])
         self.session_id: str | None = None
         self.pools = PoolStore(coordinator.runtime)
+        self.book = coordinator.budget.book  # one admission policy per service
+        self._budget_cap: bool | None = None
+        self._readings: list[dict] = []
         from ..usage.ledger import Ledger
 
         self.ledger = Ledger()
@@ -157,21 +170,32 @@ class ManagedPeer:
         since = None
         kickoff = self._is_writer()
         backlog: list[dict] = []  # informational notices, shown with the next real turn
+        pending: list[dict] | None = None  # a turn that could not run yet: retried with the same messages
         try:
             while not self._stop.is_set():
-                if _finished(self._run_state()):
+                state = self._run_state()
+                if _terminal(state):
                     return
-                messages: list[dict] = []
-                if not kickoff:
-                    result = self.co.wait(self.principal, since=since, timeout=MAX_WAIT_SECONDS, cancel=self._stop)
-                    if self._stop.is_set() or _finished(result["run"]["lifecycle"]):
-                        return
-                    since = result["last_seq"]
-                    backlog.extend(result["messages"])
+                if _paused(state):
+                    self._sleep_while_paused()
+                    continue
+                if pending is not None:
+                    messages, pending = pending, None
+                elif kickoff:
+                    messages = []
+                else:
                     if not any(_actionable(m) for m in backlog):
-                        if result["messages"] and since > self.co._cursor(self.principal):
-                            self.co.runtime.ack(self.principal, up_to_seq=since)
-                        continue
+                        result = self.co.wait(self.principal, since=since, timeout=MAX_WAIT_SECONDS, cancel=self._stop)
+                        if self._stop.is_set() or _terminal(result["run"]["lifecycle"]):
+                            return
+                        since = result["last_seq"]
+                        backlog.extend(result["messages"])
+                        if _paused(result["run"]["lifecycle"]):
+                            continue
+                        if not any(_actionable(m) for m in backlog):
+                            if result["messages"] and since > self.co._cursor(self.principal):
+                                self.co.runtime.ack(self.principal, up_to_seq=since)
+                            continue
                     messages, backlog = backlog, []
                 kickoff = False
                 policy = self.co.runtime.policy_for(self.run_id)
@@ -181,8 +205,12 @@ class ManagedPeer:
                 if used >= policy.max_invocations:
                     self._give_up(f"the run's invocation budget ({policy.max_invocations} provider turns) is spent")
                     return
-                if not self._turn(messages):
+                outcome = self._turn(messages)
+                if outcome == "stop":
                     return
+                if outcome == "retry":
+                    pending = messages
+                    continue
                 # The model may have acknowledged further during the turn
                 # (duet_wait/duet_inbox ack_through); never move backwards.
                 cursor = self.co._cursor(self.principal)
@@ -193,27 +221,132 @@ class ManagedPeer:
             log.exception("managed %s peer failed", self.provider)
             self._give_up(f"driver error: {type(exc).__name__}: {exc}")
 
-    def _reservations(self) -> list[dict]:
-        """One turn against every local turns pool for this provider, and a
-        zero reservation against cost pools: that refuses a turn once the
-        cost pool is exhausted, but cannot stop one turn from overshooting
-        (estimates arrive with D08)."""
-        out = [{"provider": self.provider, "pool": p["pool_id"], "metric": TURN_METRIC, "quantity": 1, "category": "provider_turn"} for p in self.pools.pools_for(self.provider, TURN_METRIC)]
-        out += [{"provider": self.provider, "pool": p["pool_id"], "metric": COST_METRIC, "quantity": "0", "category": "provider_turn"} for p in self.pools.pools_for(self.provider, COST_METRIC)]
-        return out
+    def _sleep_while_paused(self) -> None:
+        while not self._stop.is_set() and _paused(self._run_state()):
+            self._stop.wait(POLL_SECONDS)
 
-    def _turn(self, messages: list[dict]) -> bool:
-        runtime = self.co.runtime
+    def _wait_until_admissible(self) -> None:
+        """After a pause: sleep (no model call) until the run is resumed and
+        this provider may try again."""
+        while not self._stop.is_set():
+            state = self._run_state()
+            if _terminal(state):
+                return
+            if not _paused(state) and self.book.hold_passed(self.provider):
+                return
+            self._stop.wait(POLL_SECONDS)
+
+    # -- admission -------------------------------------------------------------------------
+
+    def _classify(self, messages: list[dict]) -> tuple[str, str]:
+        """What this turn is for decides what it may draw on (D08)."""
+        kinds = {m["kind"] for m in messages}
+        if MessageKind.REVIEW_REQUEST.value in kinds:
+            return "finishing", "review"
+        writer = self._is_writer()
         try:
-            planned = runtime.plan_action(
-                CONTROLLER, run_id=self.run_id, type="provider_turn", participant_id=self.participant_id,
+            main = self.co.runtime.store.read().require("tasks", self.co._main_task_id(self.run_id))["state"]
+        except DomainError:
+            main = None
+        if writer and main == TaskState.CHANGES_REQUESTED.value:
+            return "finishing", "repair"
+        if writer and main not in (TaskState.REVIEW_REQUIRED.value, TaskState.VERIFIED.value, TaskState.CANCELLED.value):
+            return "required", "implement"
+        if kinds & {MessageKind.QUESTION.value, MessageKind.BLOCKER.value, MessageKind.ANSWER.value}:
+            return "required", "discussion"
+        return "optional", "investigate"
+
+    def _provider_budget_cap(self) -> bool:
+        if self._budget_cap is None:
+            try:
+                self._budget_cap = bool(self.adapter.capabilities().provider_budget_cap)
+            except Exception:
+                self._budget_cap = False
+        return self._budget_cap
+
+    def _refresh_quota(self) -> None:
+        """Before retrying after a quota pause, read the provider's quota
+        windows passively where it offers that (no model call), so a reset
+        is seen from telemetry rather than by spending a turn."""
+        if self.book.hold(self.provider) is None or not self.book.hold_passed(self.provider):
+            return
+        read = getattr(self.adapter, "read_rate_limits", None)
+        if not callable(read):
+            return
+        try:
+            observations, _reason = read()
+        except Exception:
+            log.info("passive quota read for %s failed", self.provider, exc_info=True)
+            return
+        now = self.book.now_ms()
+        readings = [r for r in (gauge_from_observation(o, now) for o in observations) if r is not None]
+        if readings:
+            self.book.observe_quota(self.provider, readings, run_id=self.run_id)
+            self.book.release_if_fresh(self.provider, run_id=self.run_id)
+
+    def _record_quota(self, result: TurnResult) -> None:
+        now = self.book.now_ms()
+        self._readings = [r for r in (gauge_from_observation(o, now) for o in result.usage) if r is not None]
+        try:
+            self.book.observe_quota(self.provider, self._readings, run_id=self.run_id)
+        except DomainError:
+            log.exception("could not record %s quota readings", self.provider)
+
+    def _quota_failure(self, kind: str, message: str) -> None:
+        """A quota or rate-limit failure: pause this provider until the
+        window's reset (from this turn's readings when they carry one) or a
+        bounded backoff, then wait. Never another account or provider."""
+        stop = self.book.policy.quota_stop_percent
+        resets = [r["resets_at_ms"] for r in self._readings if r["resets_at_ms"] and r["used_percent"] >= stop]
+        reason = f"{kind}: {message}"[:500]
+        hold = self.book.place_hold(self.provider, reason, resets_at_ms=max(resets) if resets else None, run_id=self.run_id)
+        self.co.budget.pause_for(self.run_id, self.participant_id, self.provider, "quota", reason, hold.resume_at_ms if hold else None)
+        self._wait_until_admissible()
+
+    def _deferred(self, messages: list[dict], reason: str) -> None:
+        peer = self.co._peer_of(self.run_id, self.participant_id)
+        if peer is None:
+            return
+        kinds = ", ".join(sorted({m["kind"] for m in messages})) or "its own work"
+        try:
+            self.co._status(self.run_id, peer["participant_id"], f"{self.provider} deferred optional work ({kinds}): {reason}")
+        except DomainError:
+            log.exception("could not report a deferral")
+
+    # -- turn ------------------------------------------------------------------------------
+
+    def _turn(self, messages: list[dict]) -> str:
+        """One admitted provider turn. Returns "done", "retry" (the same
+        messages again later: paused or waiting) or "stop"."""
+        runtime = self.co.runtime
+        action_class, purpose = self._classify(messages)
+        self._refresh_quota()
+        try:
+            admitted = self.book.admit(
+                run_id=self.run_id, provider=self.provider, action_class=action_class, purpose=purpose, participant_id=self.participant_id,
                 input={"provider": self.provider, "turn": self.turns + 1, "messages": [m["message_id"] for m in messages], "resume": self.session_id},
-                reservations=self._reservations(),
+                per_call_budget_cap=self._provider_budget_cap(), finishing=self.co.budget.finishing_parties(self.run_id),
             )
-        except PolicyDenied as exc:
-            self._give_up(f"the local usage allowance does not cover another {self.provider} turn: {exc.message}")
-            return False
-        action_id = planned["action"]["action_id"]
+        except DomainError:
+            if _terminal(self._run_state()):
+                return "stop"  # the run ended between the loop's check and the admission
+            raise
+        decision = admitted["decision"]
+        if decision.verdict == "pause":
+            applied = self.co.budget.pause_for(self.run_id, self.participant_id, self.provider, decision.pause_kind, decision.reason, decision.resume_at_ms)
+            if decision.pause_kind != "quota" and applied != "run_paused":
+                self._stop.wait(5 * POLL_SECONDS)  # the run could not pause: never spin on admissions
+            self._wait_until_admissible()
+            return "retry"
+        if decision.verdict == "defer":
+            if decision.transient:
+                # Wait (reads only) for the probe or the unknown-size turn to settle.
+                while not self._stop.is_set() and not _terminal(self._run_state()) and self.book.settling(self.provider):
+                    self._stop.wait(POLL_SECONDS)
+                return "retry"
+            self._deferred(messages, decision.reason)
+            return "done"
+        action_id = admitted["action"]["action_id"]
         # The action lease must outlive the turn's own timeout.
         fence = runtime.claim_action(CONTROLLER, action_id, lease_seconds=int(self.turn_timeout) + 300)["lease"]["fencing_token"]
         runtime.record_action(CONTROLLER, action_id, ActionState.RUNNING, fence=fence)
@@ -227,19 +360,26 @@ class ManagedPeer:
             mcp_config=mcp_server_config(self.state_root, self.token_file, self.provider),
             env={"DUET_MANAGED_PEER": "1"},
             timeout_seconds=self.turn_timeout,
+            # Only where the provider enforces it itself (provider_cap pools).
+            max_budget_usd=decision.per_call_budget if decision.per_call_budget is not None and self._provider_budget_cap() else None,
         )
         self.turns += 1
         sent_before = self._last_sent_seq()
+        self._readings = []
         try:
             result = self.adapter.run_turn(request, cancel=self._stop)
-        except (AuthError, BillingError, QuotaError) as exc:
+        except QuotaError as exc:
+            runtime.record_action(CONTROLLER, action_id, ActionState.FAILED, fence=fence, result={"error": str(exc)[:2000], "kind": exc.kind})
+            self._quota_failure(exc.kind, str(exc))
+            return "retry"
+        except (AuthError, BillingError) as exc:
             runtime.record_action(CONTROLLER, action_id, ActionState.FAILED, fence=fence, result={"error": str(exc)[:2000], "kind": exc.kind})
             self._give_up(f"{exc.kind}: {exc}. DUET does not switch accounts, providers or billing to continue.")
-            return False
+            return "stop"
         except AgentError as exc:
             runtime.record_action(CONTROLLER, action_id, ActionState.FAILED, fence=fence, result={"error": str(exc)[:2000], "kind": exc.kind})
             self._give_up(f"{exc.kind}: {exc}")
-            return False
+            return "stop"
         except Exception as exc:
             # Record the outcome before anything else: an action left RUNNING
             # would block completion as "unobserved".
@@ -247,6 +387,7 @@ class ManagedPeer:
             raise
         self.results.append(result)
         outcome = ActionState.SUCCEEDED if result.ok else ActionState.FAILED
+        self._record_quota(result)
         actuals = self._record_usage(action_id, result)
         runtime.record_action(
             CONTROLLER, action_id, outcome, fence=fence, provider_invocation_id=result.provider_invocation_id, actuals=actuals,
@@ -255,28 +396,41 @@ class ManagedPeer:
                 "settings": {"requested": result.settings.requested, "accepted": result.settings.accepted, "observed": result.settings.observed},
                 "usage": [u.to_dict() for u in result.usage], "warnings": list(result.warnings)[:20],
                 "permission_denials": list(result.permission_denials)[:20], "text_excerpt": result.text[-2000:],
+                "admission": {"class": action_class, "purpose": purpose, "enforcement": dict(decision.enforcement), "quota": decision.quota},
             },
         )
+        quota_failed = isinstance(result.error, QuotaError)
+        self.book.settle_probe(self.provider, action_id, quota_failed=quota_failed, run_id=self.run_id)
+        try:
+            self.book.resize_finishing(self.run_id, self.provider)
+        except DomainError:
+            log.exception("could not re-estimate finishing reserves")
         if result.session_id and result.session_id != self.session_id:
             self.session_id = result.session_id
             runtime.update_participant(CONTROLLER, self.participant_id, native_session_id=result.session_id)
         if not result.ok:
             if result.status in ("cancelled", "interrupted") and self._stop.is_set():
-                return False
-            if result.error is not None and isinstance(result.error, (AuthError, BillingError, QuotaError)):
-                self._give_up(f"{result.error.kind}: {result.error}")
-                return False
+                return "stop"
+            if quota_failed:
+                self._quota_failure(result.error.kind, str(result.error))
+                return "retry"
+            if result.error is not None and isinstance(result.error, (AuthError, BillingError)):
+                self._give_up(f"{result.error.kind}: {result.error}. DUET does not switch accounts, providers or billing to continue.")
+                return "stop"
         if self._last_sent_seq() == sent_before:
             self._fallback_answers(messages, result)
         # The turn's action is settled now; completion may have been waiting on it.
         self.co.try_complete(self.run_id)
-        return True
+        return "done"
 
     def _record_usage(self, action_id: str, result: TurnResult) -> dict:
         """Record this turn's usage in the matching pools, once per pool and
         action. Cost goes through the usage ledger, so a resumed session's
         cumulative figure becomes this turn's delta, or stays unknown."""
         cost = self._turn_cost(action_id, result)
+        if cost is not None and cost < 0:
+            log.warning("turn %s: cost delta %s is negative; recorded as unknown", action_id, cost)
+            cost = None
         actuals: dict = {}
         tx = self.co.runtime.store.read()
         for row in tx.query("SELECT reservation_id, pool, metric FROM reservations WHERE action_id = ?", (action_id,)):
@@ -299,9 +453,10 @@ class ManagedPeer:
         try:
             observations = from_turn_result(result, provider=self.provider, turn_id=action_id, received_at_ms=int(time.time() * 1000), run_id=self.run_id)
             self.ledger.ingest_all(observations)
-            if not result.session_id:
-                return None
-            metric = self.ledger.session_consumption(result.session_id).get(self.provider, COST_METRIC)
+            # The run's total across this peer's sessions: a resume that
+            # returns a new session id continues from its parent's level, so
+            # per-session totals would undercount (the delta could go negative).
+            metric = self.ledger.run_consumption(self.run_id).get(self.provider, COST_METRIC)
         except (ObservationError, DomainError, ValueError) as exc:
             log.warning("usage for %s could not be normalised: %s", action_id, exc)
             self._cost_total = None

@@ -191,6 +191,10 @@ class Runtime:
                 raise Conflict("run changed since it was read", details={"expected": expected_version, "actual": run["state_version"]})
             check_transition(RUN_TRANSITIONS, RunLifecycle(run["lifecycle"]), target, "run lifecycle")
             tx.emit(self._event("run.lifecycle", {"run_id": run_id, "from": run["lifecycle"], "to": target.value, "reason": reason}, principal, run_id))
+            if target in TERMINAL_RUN:
+                # A finished run needs no finishing capacity: give it back (D08).
+                for res in tx.query("SELECT reservation_id FROM reservations WHERE run_id = ? AND action_id IS NULL AND state = ?", (run_id, ReservationState.HELD.value)):
+                    tx.emit(self._event("reservation.state", {"reservation_id": res["reservation_id"], "to": ReservationState.RELEASED.value}, principal, run_id))
             return self._run_view(tx.require("runs", run_id))
 
     def set_collaboration(self, principal: Principal, run_id: str, to: Collaboration | str, *, reason: str = "") -> dict:
@@ -824,57 +828,75 @@ class Runtime:
             raise ValidationError("input must be an object")
         check_json_size(input, "input", MAX_JSON)
         reservations = list(reservations or [])
-        clean_reservations = []
-        for res in reservations:
-            if not isinstance(res, dict):
-                raise ValidationError("reservation must be an object")
-            clean_reservations.append(
-                {
-                    "reservation_id": new_id("rsv"),
-                    "provider": check_text(res.get("provider"), "reservation.provider", limit=64),
-                    "pool": check_text(res.get("pool"), "reservation.pool", limit=MAX_ID),
-                    "metric": check_text(res.get("metric"), "reservation.metric", limit=64),
-                    "quantity": check_json_size(res.get("quantity"), "reservation.quantity", 4096),
-                    "category": check_text(res.get("category", "action"), "reservation.category", limit=64),
-                    "expires_at": res.get("expires_at"),
-                }
-            )
+        clean_reservations = self._clean_reservations(reservations)
         request = {"run_id": run_id, "type": type, "input": input, "task_id": task_id, "participant_id": participant_id, "reservations": reservations, "reserve": reserve}
 
         def run(tx: Tx) -> dict:
-            self._live_run(tx, run_id)
-            if reserve:
-                # Allowance checks run in this transaction: no other run or
-                # process can take the same capacity in between (D07).
-                from .pools import check_reservation
-
-                for res in clean_reservations:
-                    check_reservation(tx, res["pool"], res["quantity"])
-            task_revision = None
-            if task_id is not None:
-                task = tx.require("tasks", task_id)
-                if task["run_id"] != run_id:
-                    raise Unauthorized("task belongs to another run")
-                task_revision = task["revision"]
-            if participant_id is not None and tx.require("participants", participant_id)["run_id"] != run_id:
-                raise Unauthorized("participant belongs to another run")
-            action_id = new_id("act")
-            outbox_id = new_id("obx")
-            tx.emit(
-                self._event(
-                    "action.planned",
-                    {
-                        "action_id": action_id, "outbox_id": outbox_id, "run_id": run_id, "type": type,
-                        "task_id": task_id, "task_revision": task_revision, "participant_id": participant_id,
-                        "input_digest": content_hash(input), "reservations": clean_reservations, "reserve": reserve,
-                    },
-                    principal,
-                    run_id,
-                )
-            )
-            return {"action": dict(tx.require("actions", action_id)), "outbox_id": outbox_id if reserve else None}
+            return self._plan_in_tx(tx, principal, run_id=run_id, type=type, input=input, task_id=task_id,
+                                    participant_id=participant_id, reservations=clean_reservations, reserve=reserve)
 
         return self._command(principal, idempotency_key, "plan_action", request, run)
+
+    @staticmethod
+    def _clean_reservations(reservations: list) -> list[dict]:
+        clean = []
+        for res in reservations:
+            if not isinstance(res, dict):
+                raise ValidationError("reservation must be an object")
+            item = {
+                "reservation_id": new_id("rsv"),
+                "provider": check_text(res.get("provider"), "reservation.provider", limit=64),
+                "pool": check_text(res.get("pool"), "reservation.pool", limit=MAX_ID),
+                "metric": check_text(res.get("metric"), "reservation.metric", limit=64),
+                "quantity": check_json_size(res.get("quantity"), "reservation.quantity", 4096),
+                "category": check_text(res.get("category", "action"), "reservation.category", limit=64),
+                "expires_at": res.get("expires_at"),
+            }
+            if res.get("draw_from") is not None:
+                item["draw_from"] = check_text(res["draw_from"], "reservation.draw_from", limit=MAX_ID)
+            clean.append(item)
+        return clean
+
+    def _plan_in_tx(
+        self, tx: Tx, principal: Principal, *, run_id: str, type: str, input: dict, task_id: str | None,
+        participant_id: str | None, reservations: list[dict], reserve: bool,
+    ) -> dict:
+        self._live_run(tx, run_id)
+        if reserve:
+            # Allowance checks run in this transaction: no other run or
+            # process can take the same capacity in between (D07). A line
+            # drawn from a finishing reserve was checked when the reserve was
+            # made; the reducer moves it (D08).
+            from .pools import as_quantity, check_reservation
+
+            for res in reservations:
+                if res.get("draw_from"):
+                    as_quantity(res["quantity"], "reservation quantity")
+                else:
+                    check_reservation(tx, res["pool"], res["quantity"], provider=res["provider"], metric=res["metric"])
+        task_revision = None
+        if task_id is not None:
+            task = tx.require("tasks", task_id)
+            if task["run_id"] != run_id:
+                raise Unauthorized("task belongs to another run")
+            task_revision = task["revision"]
+        if participant_id is not None and tx.require("participants", participant_id)["run_id"] != run_id:
+            raise Unauthorized("participant belongs to another run")
+        action_id = new_id("act")
+        outbox_id = new_id("obx")
+        tx.emit(
+            self._event(
+                "action.planned",
+                {
+                    "action_id": action_id, "outbox_id": outbox_id, "run_id": run_id, "type": type,
+                    "task_id": task_id, "task_revision": task_revision, "participant_id": participant_id,
+                    "input_digest": content_hash(input), "reservations": reservations, "reserve": reserve,
+                },
+                principal,
+                run_id,
+            )
+        )
+        return {"action": dict(tx.require("actions", action_id)), "outbox_id": outbox_id if reserve else None}
 
     def claim_next_action(self, principal: Principal, *, lease_seconds: int = DEFAULT_ACTION_LEASE_SECONDS) -> dict | None:
         """Claim the oldest pending outbox record for this process. Serialised

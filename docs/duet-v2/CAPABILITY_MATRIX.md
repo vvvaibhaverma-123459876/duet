@@ -32,14 +32,14 @@ compatibility.
 | R04 | One objective/contract | D02, D06 | TESTED_SIM (one run, versioned acceptance contract, user-only changes; shared plans only add tasks and cannot touch the objective or contract) |
 | R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
 | R06 | Honest resources | D01, D07 | TESTED_SIM (legacy nullable cost; v2 observations with quality/scope/epoch, unknown never zero, context and quota as gauges, deduplicated pool records, cumulative totals as deltas) |
-| R07 | Completion reserve | D08 | NOT_STARTED |
+| R07 | Completion reserve | D08 | TESTED_SIM (review and repair turns reserved per provider when the pair forms; finishing turns draw once; optional work cannot touch reserves; quota loss keeps the review pending) |
 | R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery from help/model catalogue; requested/accepted/observed recorded; unsupported rejected); routing: D09 |
 | R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM: legacy (D01) and v2 predicate with controller-only finalisation (D03); joint authorship: D10 |
 | R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; mutation invalidates); delta reviews and caching: D10 |
 | R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree leaves the user checkout byte-identical; one fenced writer; explicit checked imports); integration locking: D11 |
 | R12 | Recoverability | D02, D11 | TESTED_SIM (runtime: atomic transactions, IN_DOUBT reconciliation, no blind re-dispatch); full crash matrix: D11 |
-| R13 | No silent paid fallback | D04, D08 | TESTED_SIM (no `--bare`, no API-key paths, billing errors never retried as quota); admission: D08 |
-| R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2 NOT_STARTED |
+| R13 | No silent paid fallback | D04, D08 | TESTED_SIM (no `--bare`, no API-key paths, billing errors never retried as quota; admission only admits, defers or pauses the same provider; quota pauses wait for the reset; an unenforceable cap pauses before paid work) |
+| R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2: TESTED_SIM (quota or budget pressure defers optional work and pauses; the review and checks stay required) |
 | R15 | Compatibility | D01, D13 | LEGACY_PARTIAL (documented outcome/exit-code change D-002; v1 transcript migration) |
 
 ## Acceptance tests
@@ -52,15 +52,15 @@ compatibility.
 | AT04 | Both ask while waiting | D05 | `test_a_asks_b_b_asks_a_a_answers_b_continues`, `test_simultaneous_questions_do_not_deadlock`, `test_waits_are_served_concurrently`, MCP pair test (wait already blocked when the question arrives) | TESTED_SIM |
 | AT05 | Redelivery/reconnect | D02/D05 | `test_redelivery_until_acknowledged`, `test_unacknowledged_messages_are_redelivered_after_reconnect`, `test_proxy_restart_reconnects_the_same_session` (MCP), `test_restart_settles_interrupted_checks` | TESTED_SIM |
 | AT06 | Live delivery unsupported | D12 | | NOT_STARTED |
-| AT07 | Peer quota before mandatory review | D08 | | NOT_STARTED |
+| AT07 | Peer quota before mandatory review | D08 | `test_peer_quota_loss_keeps_the_review_pending` | TESTED_SIM |
 | AT08 | Unknown usage | D07 | `test_unknown_usage_is_never_zero`, `test_absent_final_usage_after_cancellation_stays_unknown`, `test_usage_records_are_deduplicated_and_unknown_is_not_zero` (pool marked uncertain) | TESTED_SIM |
 | AT09 | Two runs share pool | D07 | `test_two_models_and_two_runs_share_one_pool_without_double_counting`, `test_reservations_draw_down_and_refuse_atomically`, `test_two_processes_cannot_both_take_the_last_unit` | TESTED_SIM |
 | AT10 | Duplicate cumulative telemetry | D07 | `test_statusline_and_cli_result_count_the_same_turn_once`, `test_replayed_codex_updates_count_once`, `test_cumulative_resume_totals_become_deltas`, emulated pair cost pool | TESTED_SIM |
 | AT11 | Context counter changes | D07 | `test_context_occupancy_never_enters_consumption`, `test_a_decrease_is_a_reset_not_a_negative_or_absolute_delta` | TESTED_SIM |
-| AT12 | External usage consumes capacity | D08 | | NOT_STARTED |
-| AT13 | Optional work vs finishing reserve | D08 | | NOT_STARTED |
-| AT14 | Mandatory action draws reserve once | D08 | | NOT_STARTED |
-| AT15 | Hard billing cap unavailable | D08 | | NOT_STARTED |
+| AT12 | External usage consumes capacity | D08 | `test_external_usage_shows_as_a_gauge_change_and_replans` | TESTED_SIM |
+| AT13 | Optional work vs finishing reserve | D08 | `test_local_turn_allowance_protects_the_review`, `test_optional_work_cannot_spend_the_finishing_reserve` | TESTED_SIM |
+| AT14 | Mandatory action draws reserve once | D08 | `test_review_capacity_is_reserved_and_drawn_once`, `test_a_finishing_action_draws_its_reserve_once` | TESTED_SIM |
+| AT15 | Hard billing cap unavailable | D08 | `test_an_unenforceable_cap_stops_paid_work_before_it_starts`, `test_a_provider_enforced_cap_is_passed_per_call` | TESTED_SIM |
 | AT16 | Small security-sensitive patch | D09 | | NOT_STARTED |
 | AT17 | Unsupported effort / org clamp | D09 | adapter-level rejection tests (D04) | PARTIAL: rejection TESTED_SIM; clamp detection needs live observation: NOT_RUN |
 | AT18 | User pins model/effort | D09/D12 | | NOT_STARTED |
@@ -85,12 +85,12 @@ compatibility.
 | AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
 | AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, migrations 0001–0003, participant instructions, Claude skill) | TESTED_SIM |
 | AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |
-| AT40 | Quota reset with stale telemetry | D08/D11 | | NOT_STARTED |
+| AT40 | Quota reset with stale telemetry | D08/D11 | `test_quota_holds_probe_once_and_release`, `test_a_passive_quota_read_ends_the_pause_without_a_probe` | TESTED_SIM (D08 part); crash matrix: D11 |
 | AT41 | Mid-turn setting change unsupported | D04/D09 | settings applied only at invocation (Claude) or `turn/start` (Codex); no steering-based switching | PARTIAL: adapters TESTED_SIM; routing boundary: D09 |
 | AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |
 | AT43 | No sandbox for borrowed session | D13 | | NOT_STARTED |
 | AT44 | Same snapshot checked twice | D10 | | NOT_STARTED |
 | AT45 | Native subagents spawn | D11 | | NOT_STARTED |
-| AT46 | Estimate overshoot before final usage | D08/D11 | | NOT_STARTED |
+| AT46 | Estimate overshoot before final usage | D08/D11 | `test_overshoot_is_recorded_not_hidden`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (D08 part); crash matrix: D11 |
 | AT47 | Integration changes tested tree | D10/D11 | | NOT_STARTED |
 | AT48 | Release handoff | D14 | | NOT_STARTED |

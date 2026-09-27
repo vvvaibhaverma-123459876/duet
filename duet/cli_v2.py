@@ -1,5 +1,6 @@
-"""v2 commands: `duet pair`, `duet mcp serve`, `duet service ...`, and
-`duet status --run` / `duet stop --run` (D05).
+"""v2 commands: `duet pair`, `duet mcp serve`, `duet service ...`,
+`duet status --run` / `duet stop --run` (D05), `duet usage` (D07) and
+`duet resume --run` (D08).
 
 These talk to the local runtime service; the legacy commands are untouched.
 Exit codes follow the D01 table: 0 verified success, 2 halted/failed,
@@ -60,20 +61,28 @@ def add_usage_parser(sub) -> None:
     set_.add_argument("--metric", required=True, choices=["turns", "cost.estimated_usd"], help="what the pool counts")
     set_.add_argument("--allowance", default=None, help="the allowance (an integer, or a decimal for cost); omit for tracking only")
     set_.add_argument("--window-seconds", type=int, default=None, help="rolling window; omit for the lifetime of the pool")
-    set_.add_argument("--enforcement", choices=["local_bound", "best_effort"], default="local_bound")
+    set_.add_argument(
+        "--enforcement", choices=["local_bound", "best_effort", "provider_cap"], default="local_bound",
+        help="local_bound: DUET refuses turns it schedules beyond the allowance; best_effort: tracked only; "
+             "provider_cap: the provider must enforce it per call (Claude cost only), otherwise the run pauses before any work",
+    )
     set_.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
 
 
-def extend_legacy(status_parser, stop_parser) -> None:
+def extend_legacy(status_parser, stop_parser, resume_parser=None) -> None:
     status_parser.add_argument("--run", default=None, metavar="RUN_ID", help="show a v2 pair run instead of detecting sessions")
     status_parser.add_argument("--json", action="store_true", help="with --run: versioned JSON output")
     status_parser.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
     stop_parser.add_argument("--run", default=None, metavar="RUN_ID", help="cancel a v2 pair run and stop its managed peers")
     stop_parser.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    if resume_parser is not None:
+        resume_parser.add_argument("--run", default=None, metavar="RUN_ID", help="resume a paused v2 run (after raising an allowance or changing a pool)")
+        resume_parser.add_argument("--reason", default="resumed by the user", help=argparse.SUPPRESS)
+        resume_parser.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
 
 
 def handles(args) -> bool:
-    return args.command in V2_COMMANDS or (args.command in ("status", "stop") and getattr(args, "run", None))
+    return args.command in V2_COMMANDS or (args.command in ("status", "stop", "resume") and getattr(args, "run", None))
 
 
 def dispatch(args) -> int:
@@ -88,6 +97,8 @@ def dispatch(args) -> int:
             return _service(args)
         if args.command == "usage":
             return _usage(args)
+        if args.command == "resume":
+            return _resume(args)
         if args.command == "status":
             return _run_status(args)
         if args.command == "stop":
@@ -170,6 +181,14 @@ def format_status(status: dict) -> str:
         lines.append("  no snapshot submitted yet")
     if status["open_requests"]:
         lines.append(f"  open requests: {len(status['open_requests'])}")
+    admission = status.get("admission") or {}
+    for item in admission.get("finishing", []):
+        if item["state"] != "HELD":
+            continue
+        short = f", short by {item['shortfall']}" if item.get("shortfall") else ""
+        lines.append(f"  finishing reserve: {item['purpose']} on {item['pool']} ({item['provider']}): {item['held']} held for {item['units_left']} turn(s){short}")
+    for hold in admission.get("holds", []):
+        lines.append(f"  {hold['provider']} paused for quota ({hold['state']}) until {hold['resume_at'] or 'unknown'}: {hold['reason'][:100]}")
     lines.append(f"  profile: {status['profile']}")
     return "\n".join(lines)
 
@@ -284,6 +303,19 @@ def _run_stop(args) -> int:
     return 0
 
 
+def _resume(args) -> int:
+    from .runtime.service import service_running
+
+    paths = _paths(args)
+    if service_running(paths):
+        run = _controller(paths).call("resume", run_id=args.run, reason=args.reason)
+    else:
+        coordinator = _local_coordinator(paths)
+        run = coordinator.budget.resume(args.run, reason=f"{args.reason} (service not running: managed peers are not attached)")
+    print(f"resumed {args.run}: {run['lifecycle']}")
+    return 0
+
+
 def _usage(args) -> int:
     from .runtime.api import Runtime
     from .runtime.contracts import USER
@@ -300,9 +332,13 @@ def _usage(args) -> int:
         )
         print(json.dumps(status, indent=2) if args.json else _format_pool(status))
         return 0
-    report = {"schema": "duet.usage/1", "pools": store.status(), "run": None}
+    from .usage.reservations import ReservationBook
+
+    book = ReservationBook(store.runtime)
+    quota = book.status(args.run)
+    report = {"schema": "duet.usage/2", "pools": store.status(), "quota": {"gauges": quota["gauges"], "holds": quota["holds"]}, "run": None}
     if args.run:
-        report["run"] = {"run_id": args.run, "records": store.run_usage(args.run)}
+        report["run"] = {"run_id": args.run, "records": store.run_usage(args.run), "finishing": quota["finishing"], "admissions": quota["admissions"]}
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
@@ -310,7 +346,15 @@ def _usage(args) -> int:
         print("no usage pools defined (DUET tracks provider turns and cost only against pools you define)")
     for pool in report["pools"]:
         print(_format_pool(pool))
+    for gauge in report["quota"]["gauges"]:
+        print(f"{gauge['provider']} quota {gauge['window']}: {gauge['used_percent']}% at {gauge['observed_at']}"
+              + (f", resets {gauge['resets_at']}" if gauge["resets_at"] else "") + " (observed, includes use outside DUET; not a balance)")
+    for hold in report["quota"]["holds"]:
+        print(f"{hold['provider']} paused for quota ({hold['state']}) until {hold['resume_at'] or 'unknown'}: {hold['reason'][:120]}")
     if report["run"] is not None:
+        for item in report["run"]["finishing"]:
+            print(f"finishing reserve {item['purpose']} on {item['pool']}: {item['held']} held for {item['units_left']}/{item['units_planned']} turn(s) [{item['state']}]"
+                  + (f", short by {item['shortfall']}" if item.get("shortfall") else ""))
         records = report["run"]["records"]
         print(f"run {args.run}: {len(records)} usage record(s)")
         for record in records:
@@ -328,6 +372,10 @@ def _format_pool(pool: dict) -> str:
     )
     if pool["available"] is not None:
         line += f", available {pool['available']}"
+    if pool.get("finishing_held") not in (None, "0"):
+        line += f" (of which {pool['finishing_held']} held for finishing)"
     if pool["uncertain"]:
         line += f" (uncertain: {pool['unknown_records']} record(s) of unknown size)"
+    if pool.get("overshoot") not in (None, "0"):
+        line += f" (turns overshot their reservation by {pool['overshoot']})"
     return line

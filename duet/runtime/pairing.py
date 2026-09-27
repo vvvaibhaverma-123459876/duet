@@ -193,9 +193,11 @@ class PairCoordinator:
         self._snapshots: dict[str, Snapshot] = {}
         self._checks_running: dict[str, threading.Thread] = {}  # checks still executing
         self._check_threads: dict[str, threading.Thread] = {}  # including their follow-up
+        from .budgeting import Budgeting
         from .taskgraph import TaskGraph
 
         self.graph = TaskGraph(self)
+        self.budget = Budgeting(self)
 
     # ------------------------------------------------------------------ notification
 
@@ -441,6 +443,7 @@ class PairCoordinator:
         if run["lifecycle"] == RunLifecycle.PLANNING.value:
             self.runtime.transition_run(CONTROLLER, run_id, RunLifecycle.EXECUTING, reason="both participants joined")
         self.runtime.set_collaboration(CONTROLLER, run_id, Collaboration.PAIR_ACTIVE, reason="both participants joined")
+        self.budget.ensure_finishing(run_id)  # before substantive implementation (D08)
         for part in self.runtime.participants(CONTROLLER, run_id):
             peer = self._peer_of(run_id, part["participant_id"])
             if peer is not None:
@@ -543,6 +546,7 @@ class PairCoordinator:
             "contributions": contributions,
             "interventions": interventions,
             "verification": verification,
+            "admission": self.budget.status(run_id),
             "profile": "fixed (peer-alpha): no adaptive model or effort routing",
             "control_coverage": (
                 "DUET bounds the turns, checks and messages it schedules. Work a native session does outside these "

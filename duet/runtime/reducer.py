@@ -10,6 +10,8 @@ transitions exist. `IN_DOUBT` deliberately has no edge back to DISPATCHING:
 an action whose effects are unknown is never blindly repeated."""
 from __future__ import annotations
 
+import json
+from decimal import Decimal
 from typing import Callable
 
 from .contracts import (
@@ -148,6 +150,23 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     "usage_records": (
         "record_id",
         ("record_id", "pool_id", "run_id", "action_id", "participant_id", "metric", "quantity_json", "quality", "source", "observed_at", "created_at"),
+    ),
+    # D08: finishing reserves, provider quota, admission decisions (migration 0006)
+    "finishing_reserves": (
+        "reservation_id",
+        ("reservation_id", "run_id", "purpose", "provider", "pool", "metric", "units_planned", "units_left", "per_unit_json", "shortfall_json", "created_at", "updated_at"),
+    ),
+    "quota_gauges": (
+        "gauge_id",
+        ("gauge_id", "provider", "window", "used_percent_json", "previous_percent_json", "resets_at", "observed_at", "source", "created_at", "updated_at"),
+    ),
+    "quota_holds": (
+        "provider",
+        ("provider", "state", "reason", "resume_at", "attempts", "probe_action_id", "placed_at", "updated_at"),
+    ),
+    "admissions": (
+        "admission_id",
+        ("admission_id", "run_id", "participant_id", "action_id", "provider", "action_class", "purpose", "verdict", "reason", "detail_json", "created_at"),
     ),
 }
 REPLAYED_TABLES = tuple(TABLES)
@@ -492,6 +511,8 @@ def _action_planned(p: dict, e: Event, get: Getter) -> list[Upsert]:
         )
     ]
     for res in p.get("reservations", []):
+        if res.get("draw_from"):
+            upserts += _draw(res, p["run_id"], e, get)
         upserts.append(
             (
                 "reservations",
@@ -530,6 +551,22 @@ def _action_planned(p: dict, e: Event, get: Getter) -> list[Upsert]:
             )
         )
     return upserts
+
+
+def _draw(res: dict, run_id: str, e: Event, get: Getter) -> list[Upsert]:
+    """A finishing action draws from its run's earmarked reserve: the reserve
+    shrinks by exactly what the action's reservation holds, so the capacity
+    is held once, never twice (AT14)."""
+    source = _require(get, "reservations", res["draw_from"])
+    finishing = _require(get, "finishing_reserves", res["draw_from"])
+    if source["state"] != ReservationState.HELD.value or source["run_id"] != run_id or source["pool"] != res["pool"] or source["metric"] != res["metric"]:
+        raise InvalidTransition(f"reservation {res['draw_from']} cannot fund this action")
+    left = Decimal(json.loads(source["quantity_json"])) - Decimal(str(res["quantity"]))
+    if left < 0 or finishing["units_left"] < 1:
+        raise InvalidTransition(f"finishing reserve {res['draw_from']} does not hold enough for this action")
+    source.update(quantity_json=_j(str(left)), updated_at=e.at)
+    finishing.update(units_left=finishing["units_left"] - 1, updated_at=e.at)
+    return [("reservations", source), ("finishing_reserves", finishing)]
 
 
 def _action_transition(p: dict, e: Event, get: Getter) -> list[Upsert]:
@@ -943,6 +980,108 @@ def _usage_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
     ]
 
 
+def _finishing_reserved(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if get("reservations", p["reservation_id"]) is not None:
+        raise InvalidTransition(f"reservation {p['reservation_id']} already exists")
+    if p["purpose"] not in ("review", "repair") or int(p["units"]) < 1:
+        raise ValidationError("a finishing reserve is for review or repair, and at least one turn")
+    return [
+        (
+            "reservations",
+            {
+                "reservation_id": p["reservation_id"], "run_id": p["run_id"], "action_id": None, "provider": p["provider"],
+                "pool": p["pool"], "metric": p["metric"], "quantity_json": _j(p["quantity"]), "category": f"finishing:{p['purpose']}",
+                "state": ReservationState.HELD.value, "expires_at": None, "actual_json": None, "created_at": e.at, "updated_at": e.at,
+            },
+        ),
+        (
+            "finishing_reserves",
+            {
+                "reservation_id": p["reservation_id"], "run_id": p["run_id"], "purpose": p["purpose"], "provider": p["provider"],
+                "pool": p["pool"], "metric": p["metric"], "units_planned": int(p["units"]), "units_left": int(p["units"]),
+                "per_unit_json": _j(p["per_unit"]) if p.get("per_unit") is not None else None,
+                "shortfall_json": _j(p["shortfall"]) if p.get("shortfall") is not None else None,
+                "created_at": e.at, "updated_at": e.at,
+            },
+        ),
+    ]
+
+
+def _finishing_resized(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    reservation = _require(get, "reservations", p["reservation_id"])
+    finishing = _require(get, "finishing_reserves", p["reservation_id"])
+    _expect(reservation, "state", ReservationState.HELD.value, "finishing reserve")
+    reservation.update(quantity_json=_j(p["quantity"]), updated_at=e.at)
+    finishing.update(
+        per_unit_json=_j(p["per_unit"]) if p.get("per_unit") is not None else None,
+        shortfall_json=_j(p["shortfall"]) if p.get("shortfall") is not None else None,
+        updated_at=e.at,
+    )
+    return [("reservations", reservation), ("finishing_reserves", finishing)]
+
+
+def _quota_observed(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    gauge_id = f"{p['provider']}:{p['window']}"
+    existing = get("quota_gauges", gauge_id)
+    if existing is not None and existing["observed_at"] > p["observed_at"]:
+        return []  # an older reading arriving late never replaces a newer one
+    return [
+        (
+            "quota_gauges",
+            {
+                "gauge_id": gauge_id, "provider": p["provider"], "window": p["window"], "used_percent_json": _j(p["used_percent"]),
+                "previous_percent_json": existing["used_percent_json"] if existing else None, "resets_at": p.get("resets_at"),
+                "observed_at": p["observed_at"], "source": p["source"],
+                "created_at": existing["created_at"] if existing else e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _quota_hold(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    return [
+        (
+            "quota_holds",
+            {
+                "provider": p["provider"], "state": "HELD", "reason": p["reason"], "resume_at": p.get("resume_at"),
+                "attempts": int(p.get("attempts", 0)), "probe_action_id": None,
+                # Every placement starts a new hold: only readings taken after it can end it.
+                "placed_at": e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _quota_probe(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "quota_holds", p["provider"])
+    _expect(row, "state", "HELD", "quota hold")
+    row.update(state="PROBING", probe_action_id=p["action_id"], updated_at=e.at)
+    return [("quota_holds", row)]
+
+
+def _quota_released(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "quota_holds", p["provider"])
+    if row["state"] == "RELEASED":
+        raise InvalidTransition(f"{p['provider']} is not paused for quota")
+    row.update(state="RELEASED", reason=p["reason"], probe_action_id=None, updated_at=e.at)
+    return [("quota_holds", row)]
+
+
+def _admission_decided(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    return [
+        (
+            "admissions",
+            {
+                "admission_id": p["admission_id"], "run_id": p["run_id"], "participant_id": p.get("participant_id"),
+                "action_id": p.get("action_id"), "provider": p["provider"], "action_class": p["action_class"], "purpose": p["purpose"],
+                "verdict": p["verdict"], "reason": p["reason"], "detail_json": _j(p.get("detail", {})), "created_at": e.at,
+            },
+        )
+    ]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -983,6 +1122,13 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "intervention.recorded": _intervention_recorded,
     "pool.defined": _pool_defined,
     "usage.recorded": _usage_recorded,
+    "finishing.reserved": _finishing_reserved,
+    "finishing.resized": _finishing_resized,
+    "quota.observed": _quota_observed,
+    "quota.hold": _quota_hold,
+    "quota.probe": _quota_probe,
+    "quota.released": _quota_released,
+    "admission.decided": _admission_decided,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

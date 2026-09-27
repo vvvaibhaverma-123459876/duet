@@ -440,28 +440,50 @@ class TestManagedPeer:
         finally:
             service.close()
 
-    def test_local_turn_allowance_is_reserved_and_recorded(self, paths, tmp_path):
+    def test_local_turn_allowance_protects_the_review(self, paths, tmp_path):
+        """D08 (AT13, AT14): the review turns are reserved when the pair
+        forms; optional turns may use only what is left, and the review turn
+        draws on its reserve instead of holding the capacity twice."""
         from duet.runtime.contracts import USER
         from duet.runtime.pools import PoolStore
 
         peers = {}
-        service = start(paths, peer_factory=factory_for({"codex": lambda tools, request: "noted"}, peers))
+
+        def codex(tools, request):
+            for mid in message_ids(request.prompt, "REVIEW_REQUEST"):
+                tools.call("send", kind="REVIEW_RESULT", body="Looks right.", reply_to=mid, review={"disposition": "approve"})
+            return "noted"
+
+        service = start(paths, peer_factory=factory_for({"codex": codex}, peers))
         try:
-            PoolStore(service.runtime).define_pool(USER, "codex-turns", provider="codex", metric="turns", unit="turns", allowance=1)
+            pools = PoolStore(service.runtime)
+            pools.define_pool(USER, "codex-turns", provider="codex", metric="turns", unit="turns", allowance=3)
             repo = make_repo(tmp_path / "repo")
             client = ServiceClient(paths)
             joined = client.call("join", provider="claude", objective="x", repo=str(repo), checks=[CHECK], peer="managed")
             me = client.with_token(joined["token"])
+            finishing = me.call("status")["admission"]["finishing"]
+            assert [(f["purpose"], f["provider"], f["held"], f["units_left"]) for f in finishing] == [("review", "codex", "2", 2)]
             me.call("send", kind="FINDING", body="one")
             assert wait_until(lambda: len(peers["codex"][1].requests) == 1, 20)
-            assert wait_until(lambda: PoolStore(service.runtime).status("codex-turns")[0]["used"] == "1", 20)
+            assert wait_until(lambda: pools.status("codex-turns")[0]["used"] == "1", 20)
             me.call("send", kind="FINDING", body="two")
-            assert wait_until(lambda: me.call("status")["collaboration"] == "PEER_UNAVAILABLE", 20)
-            assert len(peers["codex"][1].requests) == 1  # the second turn was never dispatched
-            notes = [m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"]
-            assert any("allowance does not cover another codex turn" in n for n in notes)
-            records = PoolStore(service.runtime).run_usage(joined["run_id"])
-            assert [(r["pool_id"], r["quantity"], r["quality"]) for r in records] == [("codex-turns", "1", "observed")]
+            assert wait_until(lambda: any("deferred optional work" in m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"), 20)
+            assert len(peers["codex"][1].requests) == 1  # the optional turn would have spent the review's capacity
+            claimed = me.call("claim")
+            Path(claimed["workspace"], "calc.py").write_text(MUL)
+            me.call("submit", summary="mul added")
+            assert wait_until(lambda: me.call("status")["lifecycle"] == "COMPLETED_VERIFIED", 30)
+            assert len(peers["codex"][1].requests) == 2  # the review ran, funded by its reserve
+            status = pools.status("codex-turns")[0]
+            assert (status["used"], status["held"], status["available"]) == ("2", "0", "1")  # held once, then released with the run
+            admissions = service.coordinator.budget.book.status(joined["run_id"])["admissions"]
+            verdicts = [(a["action_class"], a["purpose"], a["verdict"]) for a in reversed(admissions)]
+            assert verdicts == [("optional", "investigate", "admit"), ("optional", "investigate", "defer"), ("finishing", "review", "admit")]
+            review = next(a for a in admissions if a["purpose"] == "review")
+            assert review["detail"]["lines"][0]["draw_from"] == finishing[0]["reservation_id"]
+            records = pools.run_usage(joined["run_id"])
+            assert [(r["pool_id"], r["quantity"], r["quality"]) for r in records] == [("codex-turns", "1", "observed")] * 2
         finally:
             service.close()
 
