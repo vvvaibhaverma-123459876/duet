@@ -30,8 +30,19 @@ def state_dir(create: bool = True) -> Path:
 
 def ensure_private_dir(path: Path) -> Path:
     """Create `path` as 0700 if missing; refuse an existing directory that
-    other users can write to, or one owned by someone else."""
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    other users can write to, or one owned by someone else. Missing parents
+    are created 0700 too: `mkdir(parents=True)` would give them the umask's
+    mode (0775 under the common 002), which the check below then refuses."""
+    missing = []
+    probe = path
+    while not probe.exists() and probe.parent != probe:
+        missing.append(probe)
+        probe = probe.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
     if os.name == "nt":  # pragma: no cover - POSIX permission model only
         return path
     info = path.stat()

@@ -166,6 +166,19 @@ class TestStatePaths:
             ensure_private_dir(path)
 
     @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
+    def test_missing_parents_are_private_under_a_group_writable_umask(self, tmp_path):
+        """Under umask 002 (common on Ubuntu) mkdir(parents=True) made the
+        parents 0775, and the state root was then refused on next use."""
+        old = os.umask(0o002)
+        try:
+            ensure_private_dir(tmp_path / "state" / "v2" / "pairs")
+            ensure_private_dir(tmp_path / "state")  # the state root is accepted afterwards
+        finally:
+            os.umask(old)
+        for part in ("state", "state/v2", "state/v2/pairs"):
+            assert stat.S_IMODE((tmp_path / part).stat().st_mode) == 0o700
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions")
     def test_group_readable_dir_is_tightened(self, tmp_path):
         path = tmp_path / "loose"
         path.mkdir()

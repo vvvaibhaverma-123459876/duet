@@ -200,7 +200,7 @@ def run_bounded(
     # and must not outlive the call: a descendant holding our pipes, and also
     # one that redirected its stdio away (`cmd >/dev/null 2>&1 &`), which no
     # pipe would ever reveal.
-    _kill_group(proc.pid, signal.SIGKILL)
+    _clear_group(proc.pid)
     if any(reader.is_alive() for reader in readers):
         _join(readers, 1.0)
     incomplete = any(reader.is_alive() for reader in readers)
@@ -241,6 +241,25 @@ def terminate_tree(proc: subprocess.Popen, grace: float = TERM_GRACE_SECONDS) ->
         proc.wait(timeout=grace)
     except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL is not ignorable
         pass
+
+
+def _clear_group(pgid: int, within: float = 0.5) -> None:
+    """SIGKILL what is left of an exited leader's process group, and keep
+    re-sending (bounded by `within`) while members remain, so one that was
+    not yet scheduled, or mid-fork, when the first signal went out cannot
+    survive. Call only after the leader was reaped: members awaiting their
+    reaper (zombies) still count, and the loop then just runs out."""
+    if os.name == "nt":  # pragma: no cover
+        return
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            return
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.02)
 
 
 def _kill_group(pgid: int, sig: int) -> None:
@@ -469,7 +488,7 @@ def stream_process(
     if proc.poll() is None:  # pragma: no cover - defensive
         terminate_tree(proc, grace=term_grace)
     # Anything still in the group after the leader exited is ours.
-    _kill_group(proc.pid, signal.SIGKILL)
+    _clear_group(proc.pid)
     err_reader.join(timeout=1.0)
     return StreamResult(
         returncode=proc.returncode,

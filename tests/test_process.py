@@ -21,6 +21,17 @@ def _wait_dead(pid: int, seconds: float = 5.0) -> bool:
     return not _alive(pid)
 
 
+def _describe(pid: int) -> str:
+    """State, parent, process group and session of a survivor, so a failure
+    explains itself (it has never reproduced locally)."""
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        comm = Path(f"/proc/{pid}/comm").read_text().strip()
+        return f"{comm} state={fields[0]} ppid={fields[1]} pgrp={fields[2]} sid={fields[3]}"
+    except OSError as exc:
+        return f"unreadable: {exc}"
+
+
 def _reap(pid: int) -> None:
     try:
         os.kill(pid, 9)
@@ -233,6 +244,6 @@ class TestStreamProcess:
         grandchild = int(pidfile.read_text())
         try:
             assert lines == ["done"] and result.returncode == 0
-            assert _wait_dead(grandchild)
+            assert _wait_dead(grandchild), f"grandchild survived: {_describe(grandchild)}"
         finally:
             _reap(grandchild)
