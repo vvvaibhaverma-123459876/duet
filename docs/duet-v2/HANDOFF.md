@@ -4,16 +4,16 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D00**.
+- Last completed milestone: **D01** (see `D01_REPORT.md`).
 - `feat/isolate-modes` is merged in (`9db29f3`).
-- Baseline: 178 passed, 1 skipped as non-root. As root, the doctor root check
-  fails the battery (see `BASELINE.md`).
+- Suite after D01: 291 passed, 1 skipped as root; 289 passed, 3 skipped as
+  non-root. The non-root packaging tests skip because that user cannot read
+  the proxy CA bundle.
 
 ## How to run the tests here
 
-The container runs as root, and on the pre-D01 baseline the battery fails
-under root. Run the suite as a non-root user by mirroring the tree into their
-home:
+Since D01 the suite passes as root (`python3 -m pytest -q`). To also check
+non-root behaviour, mirror the tree into the ubuntu user's home:
 
 ```bash
 tar -C /home/user/duet --exclude=.git -cf - . | (mkdir -p /home/ubuntu/duet-ci && tar -C /home/ubuntu/duet-ci -xf -)
@@ -23,9 +23,10 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-D01: add failing regression tests for the D01 list in the specification, then
-fix the legacy layers (`broker`, `adapters`, `stopconditions`, `verifiers`,
-`config`, `transcript`, `cli`).
+D02: the typed runtime core (`duet/runtime`): contracts, SQLite store with
+packaged migrations, reducer and state machines, outbox, fenced leases,
+approvals, and participant-bound identity, all with crash, replay and
+idempotency tests.
 
 ## Uncommitted files
 

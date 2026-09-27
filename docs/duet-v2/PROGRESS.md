@@ -6,7 +6,7 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | Milestone | State | Commit | Implemented | Tested | Independent review | Live-proven |
 |---|---|---|---|---|---|---|
 | D00 Inventory & baseline | done | see HANDOFF | docs | baseline recorded | n/a | n/a |
-| D01 Completion/accounting/process semantics | not started | | | | | |
+| D01 Completion/accounting/process semantics | done | see HANDOFF | legacy layers | 291 passed/1 skipped (root), 289/3 (non-root) | pending (no Codex) | n/a |
 | D02 Runtime store & authorisation | not started | | | | | |
 | D03 Workspace & evidence gate | not started | | | | | |
 | D04 Provider adapters | not started | | | | | |

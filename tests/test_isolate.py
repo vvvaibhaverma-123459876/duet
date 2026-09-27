@@ -347,7 +347,7 @@ class TestCommitAttribution:
             "run", "--repo", str(source), "--isolate", "snapshot", "--commit-mode", "agent-driven", "t",
             env={"AGENT_COMMITS": "1"},
         )
-        assert "Outcome: success" in proc.stdout, proc.stdout + proc.stderr
+        assert "Outcome: unverified" in proc.stdout, proc.stdout + proc.stderr
         workspace = Path(_workspace_of(proc.stdout))
 
         assert "Claude <claude@duet.local>" in authors(workspace)
@@ -365,7 +365,7 @@ class TestCommitAttribution:
 
     def test_default_commit_mode_still_injects_a_broker_commit(self, duet, source):
         proc = duet("run", "--repo", str(source), "--isolate", "snapshot", "t")
-        assert "Outcome: success" in proc.stdout, proc.stdout + proc.stderr
+        assert "Outcome: unverified" in proc.stdout, proc.stdout + proc.stderr
         workspace = Path(_workspace_of(proc.stdout))
 
         assert "Claude turn" in subjects(workspace), "default mode must keep committing per turn"
@@ -401,14 +401,14 @@ class TestIsolateThroughCli:
 
     def test_bare_repo_is_in_place_and_cuts_a_branch_in_the_source(self, duet, source):
         proc = duet("run", "--repo", str(source), "t")
-        assert "Outcome: success" in proc.stdout
+        assert "Outcome: unverified" in proc.stdout
         branches = git("branch", "--list", "duet/session-*", cwd=source)
         assert branches.strip(), "bare --repo must still cut a branch in the real repo"
 
     def test_snapshot_leaves_the_source_repo_completely_untouched(self, duet, source):
         head_before, refs_before = git("rev-parse", "HEAD", cwd=source), refs(source)
         proc = duet("run", "--repo", str(source), "--isolate", "snapshot", "t")
-        assert "Outcome: success" in proc.stdout
+        assert "Outcome: unverified" in proc.stdout
         assert "will not be modified" in proc.stdout
 
         assert git("rev-parse", "HEAD", cwd=source) == head_before
@@ -441,7 +441,7 @@ class TestIsolateThroughCli:
         # isolated. Contrast with the flag/env case, which is a hard error.
         config = config_with(duet.harness, tmp_path, isolate="snapshot")
         proc = duet("run", "t", config=config)
-        assert "Outcome: success" in proc.stdout, proc.stdout + proc.stderr
+        assert "Outcome: unverified" in proc.stdout, proc.stdout + proc.stderr
 
     def test_isolate_config_default_still_applies_with_repo(self, duet, tmp_path, source):
         config = config_with(duet.harness, tmp_path, isolate="snapshot")

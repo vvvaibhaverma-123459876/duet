@@ -1,0 +1,39 @@
+[session]
+start_with = "claude"
+max_turns = 6
+wallclock_seconds = 900
+loop_threshold = 0.9
+# When an agent hits its usage/rate limit: "halt" (clean stop, resumable),
+# "solo" (drop it, surviving agent continues), or "wait" (sleep and retry).
+on_quota = "halt"
+quota_wait_seconds = 300
+# With --repo: "none" (in place), "worktree" (linked worktree), or "snapshot"
+# (full copy incl. untracked/ignored files; source never touched).
+isolate = "none"
+# "default" (Broker commits each turn) or "agent-driven" (Broker commits nothing;
+# agents' own commits are attributed to them via their subprocess git identity).
+commit_mode = "default"
+
+[agents.claude]
+display_name = "Claude"
+command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions"]
+prompt_via = "stdin"
+workspace_flag = "--add-dir"
+output_format = "json"
+result_json_path = "result"
+session_json_path = "session_id"
+cost_json_path = "total_cost_usd"
+resume_command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions", "--resume", "{session_id}"]
+model = ""
+timeout_seconds = 300
+
+[agents.codex]
+display_name = "Codex"
+command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "--skip-git-repo-check"]
+resume_command = ["codex", "--ask-for-approval", "never", "--sandbox", "workspace-write", "exec", "-C", "{workspace}", "--skip-git-repo-check", "resume", "{session_id}"]
+prompt_via = "stdin-sentinel"
+stdin_sentinel = "-"
+workspace_flag = "-C"
+output_format = "text-last-line"
+model = ""
+timeout_seconds = 300

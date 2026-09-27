@@ -36,6 +36,27 @@ def create_workspace(path: str | None = None, reset: bool = False) -> Path:
     return workspace.resolve()
 
 
+def open_existing_workspace(path: str | Path) -> Path:
+    """Re-open a scratch workspace a previous Duet run created, e.g. for
+    `duet resume`. Unlike create_workspace this may be the current directory
+    (users naturally cd into the workspace), but it must be an existing git work
+    tree that carries a Duet resume manifest, and never home, root, or a system
+    path. Nothing is initialised or reset."""
+    workspace = Path(path).expanduser().resolve()
+    if not workspace.is_dir():
+        raise WorkspaceError(f"workspace does not exist: {workspace}")
+    home = Path.home().resolve()
+    if workspace in {Path("/").resolve(), home} or _is_under_system_root(workspace):
+        raise WorkspaceError(f"refusing unsafe workspace path: {workspace}")
+    if not (workspace / ".duet" / "resume.json").is_file():
+        raise WorkspaceError(f"{workspace} has no .duet/resume.json; it is not a Duet workspace to resume")
+    if not is_git_worktree(workspace):
+        raise WorkspaceError(f"{workspace} is not a git work tree")
+    _exclude_duet_dir(workspace)
+    acquire_lock(workspace)
+    return workspace
+
+
 def _exclude_duet_dir(workspace: Path) -> None:
     """Keep Duet's own bookkeeping (`.duet/`, incl. the session lock) out of
     `git add -A` via `.git/info/exclude`. This is local-only and never itself

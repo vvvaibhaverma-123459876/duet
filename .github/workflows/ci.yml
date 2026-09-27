@@ -19,7 +19,23 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: pip install -e ".[test]"
-      - name: Unit and hermetic e2e battery
+      - name: Unit, hermetic e2e battery, and wheel packaging
         # The battery drives the real duet CLI against fake agent binaries,
         # so it runs fully offline; the DUET_E2E-gated real-CLI test skips.
+        # tests/test_packaging.py builds a wheel and runs it outside the tree.
         run: pytest -q
+
+  test-as-root:
+    # Containers and devcontainers commonly run as root; Duet must still work
+    # there (only permission-bypass agents are disabled).
+    runs-on: ubuntu-latest
+    container: python:3.11
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: pip install -e ".[test]"
+      - name: Suite as root
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          id -u
+          pytest -q

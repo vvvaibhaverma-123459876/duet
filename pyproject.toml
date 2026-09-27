@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# PEP 639 `license = "MIT"` needs setuptools >= 77.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,7 +20,13 @@ duet = "duet.cli:main"
 [tool.setuptools.packages.find]
 include = ["duet*"]
 
+[tool.setuptools.package-data]
+# Defaults, migrations and integration instructions must ship in the wheel;
+# nothing may be read from beside a source checkout.
+duet = ["resources/*.toml", "resources/**/*.md", "runtime/migrations/*.sql"]
+
 [tool.pytest.ini_options]
 markers = [
-  "e2e: runs real Claude Code and Codex CLIs"
+  "e2e: runs real Claude Code and Codex CLIs",
+  "packaging: builds a wheel and inspects its contents"
 ]

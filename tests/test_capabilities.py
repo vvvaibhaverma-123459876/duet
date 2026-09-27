@@ -179,7 +179,7 @@ class TestCostParsing:
         )
         assert agent.send("hi", tmp_path).cost_usd == pytest.approx(0.0421)
 
-    def test_missing_cost_path_is_zero_not_error(self, tmp_path):
+    def test_missing_cost_path_is_unknown_not_zero(self, tmp_path):
         script = tmp_path / "fake"
         script.write_text('#!/bin/sh\ncat > /dev/null\necho \'{"result":"ok"}\'\n')
         script.chmod(0o755)
@@ -194,7 +194,7 @@ class TestCostParsing:
             result_json_path="result",
             cost_json_path="total_cost_usd",
         )
-        assert agent.send("hi", tmp_path).cost_usd == 0.0
+        assert agent.send("hi", tmp_path).cost_usd is None  # D-003: unknown is never zero
 
 
 class TestQuotaMarkers:

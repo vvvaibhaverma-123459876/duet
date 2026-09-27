@@ -70,7 +70,8 @@ class TestQuotaSolo:
             "codex": FakeAgent("codex", [QuotaError("codex: usage limit")]),
         }
         result = run(ws, agents, on_quota="solo")
-        assert result.outcome == "success"
+        # No verifier configured, so the survivor's [[DONE]] is only a claim.
+        assert result.outcome == "unverified"
         assert [m.agent for m in result.transcript.messages] == ["claude", "claude"]
         assert any("dropped from the rotation" in note for note in result.transcript.notes)
 
@@ -90,7 +91,7 @@ class TestQuotaWait:
         codex = FakeAgent("codex", [QuotaError("codex: rate limit"), "recovered [[DONE]]"])
         agents = {"codex": codex}
         result = run(ws, agents, on_quota="wait", quota_wait_seconds=7)
-        assert result.outcome == "success"
+        assert result.outcome == "unverified"
         assert slept == [7]
         assert codex.calls == 2
         assert any("waiting 7s" in note for note in result.transcript.notes)

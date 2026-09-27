@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import TextIO
 
 from . import __version__
+from .adapters import AgentError
 from .broker import SessionResult, run_session
+from .prompting import default_roles
 from .config import DuetConfig
 from .doctor import available_agent_names
 from .transcript import Transcript
@@ -70,7 +72,7 @@ class Repl:
         if start not in self.agents:
             start = next(iter(self.agents))
         self.force_next = None
-        roles = _roles(start)
+        roles = default_roles(start, list(self.agents))
         result = run_session(
             task,
             self.workspace,
@@ -114,8 +116,13 @@ class Repl:
             print(f"Next speaker forced to {parts[1]}.", file=self.stdout)
         elif cmd == "/ask" and len(parts) >= 3 and parts[1] in self.agents:
             agent = self.agents[parts[1]]
-            result = agent.send(" ".join(parts[2:]), self.workspace)
-            print(result.text, file=self.stdout)
+            try:
+                result = agent.send(" ".join(parts[2:]), self.workspace)
+            except AgentError as exc:
+                # One failed call must not take down the REPL (and skip lock release).
+                print(f"{parts[1]} failed: {exc}", file=self.stdout)
+            else:
+                print(result.text, file=self.stdout)
         elif cmd == "/stop":
             print("Stopped current task; workspace kept.", file=self.stdout)
         elif cmd == "/pause":
@@ -149,10 +156,3 @@ def run_seeded_repl_task(repl: Repl, task: str) -> None:
     seed_demo(repl.workspace)
     repl._task(task)
 
-
-def _roles(start: str) -> dict[str, str]:
-    other = "codex" if start == "claude" else "claude"
-    return {
-        start: "You are the Implementer. Edit source files to implement the requested behavior, run tests when useful, then hand off.",
-        other: "You are the Verifier. Add edge-case tests when useful, review for bugs, run tests, and report issues or completion.",
-    }

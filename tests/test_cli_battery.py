@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,8 @@ echo "$@" >> "$BATTERY_STATE/fc-args.log"
 n_file="$BATTERY_STATE/fc-n"; n=$(cat "$n_file" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$n_file"
 case "${FC_MODE:-done}" in
   done)    [[ $n -ge 2 ]] && r="finishing [[DONE]]" || r="turn $n work [[HANDOFF]]" ;;
+  work)    r="turn $n work [[HANDOFF]]" ;;
+  mention) r="I will not claim completion yet; [[DONE]] comes later"$'\n'"still working [[HANDOFF]]" ;;
   loop)    r="identical repeated answer every time" ;;
   hang)    sleep 30; r="too late" ;;
   edit)    echo "line-$n" >> file.txt; [[ $n -ge 2 ]] && r="edited [[DONE]]" || r="edited [[HANDOFF]]" ;;
@@ -93,7 +97,7 @@ def duet(harness, tmp_path):
     state = tmp_path / "state"
     state.mkdir()
 
-    def run(*args: str, env: dict | None = None, stdin: str = "") -> subprocess.CompletedProcess:
+    def run(*args: str, env: dict | None = None, stdin: str = "", cwd: Path | None = None) -> subprocess.CompletedProcess:
         full_env = os.environ.copy()
         full_env["PATH"] = f"{harness['bindir']}:{full_env['PATH']}"
         full_env["BATTERY_STATE"] = str(state)
@@ -107,9 +111,12 @@ def duet(harness, tmp_path):
             capture_output=True,
             timeout=120,
             env=full_env,
+            cwd=cwd,
         )
 
     run.state = state
+    run.harness_config = harness["config"]
+    run.harness_bindir = harness["bindir"]
     return run
 
 
@@ -126,10 +133,19 @@ def live_repo(tmp_path: Path) -> Path:
 
 
 class TestCoreLoop:
-    def test_scratch_run_success_both_agents(self, duet):
+    def test_scratch_run_without_verifier_is_unverified(self, duet):
+        # D-002: agreement to stop is a claim; with no verifier it is reported
+        # as unverified (exit 3), never as success.
         proc = duet("run", "t")
-        assert "Outcome: success" in proc.stdout
+        assert "Outcome: unverified" in proc.stdout
         assert "Turn 2: Codex" in proc.stdout
+        assert proc.returncode == 3
+
+    def test_scratch_run_with_passing_verifier_is_success(self, duet):
+        proc = duet("run", "--verify", "cmd:true", "t")
+        assert "Outcome: success" in proc.stdout
+        assert "Final verification: passed" in proc.stdout
+        assert proc.returncode == 0
 
     def test_loop_detector_halts_repetition(self, duet):
         proc = duet("run", "--max-turns", "6", "t", env={"FC_MODE": "loop", "FX_MODE": "loop"})
@@ -204,17 +220,29 @@ class TestQuotaPolicies:
 
     def test_solo_survivor_finishes_with_note(self, duet):
         proc = duet("run", "--on-quota", "solo", "t", env={"FX_MODE": "quota"})
-        assert "Outcome: success" in proc.stdout
+        assert "Outcome: unverified" in proc.stdout
         assert "dropped from the rotation" in proc.stdout
+
+    def test_solo_completion_keeps_partner_review_pending(self, duet, tmp_path):
+        # R14: quota loss must not remove the partner's review obligation. The
+        # survivor's changes pass the checks, but codex never reviewed them.
+        repo = live_repo(tmp_path)
+        proc = duet(
+            "run", "--repo", str(repo), "--on-quota", "solo", "--verify", "cmd:true", "t",
+            env={"FX_MODE": "quota", "FC_MODE": "edit"},
+        )
+        assert "Outcome: review_pending" in proc.stdout
+        assert "ReviewPending(codex)" in proc.stdout
+        assert proc.returncode == 4
 
     def test_wait_retries_same_agent(self, duet):
         proc = duet("run", "--on-quota", "wait", "--quota-wait-seconds", "1", "t", env={"FX_MODE": "quota1"})
-        assert "Outcome: success" in proc.stdout
+        assert "Outcome: unverified" in proc.stdout
         assert "waiting 1s" in proc.stdout
 
     def test_preflight_excludes_dead_agent(self, duet):
         proc = duet("run", "t", env={"FX_MODE": "deadstart"})
-        assert "Outcome: success" in proc.stdout  # claude proceeds alone
+        assert "Outcome: unverified" in proc.stdout  # claude proceeds alone
 
 
 class TestResume:
@@ -226,7 +254,7 @@ class TestResume:
         (duet.state / "fc-n").unlink(missing_ok=True)
         proc = duet("resume", "--repo", str(repo))
         assert "Resuming duet" in proc.stdout
-        assert "Outcome: success" in proc.stdout
+        assert "Outcome: unverified" in proc.stdout
 
     def test_missing_manifest_clean_error(self, duet, tmp_path):
         proc = duet("resume", "--repo", str(tmp_path))
@@ -288,10 +316,20 @@ class TestVerifyAndBudget:
         assert "Invalid --verify" in proc.stderr
 
     def test_budget_halts_and_reports_cost(self, duet):
-        # fake claude reports $0.25/turn; budget $0.30 halts on turn 2's spend
-        proc = duet("run", "--budget-usd", "0.30", "--max-turns", "6", "t", env={"FX_MODE": "loop"})
+        # fake claude reports $0.25/turn and never claims done; codex reports
+        # nothing. After claude's second turn ($0.50 >= $0.30) no new turn is admitted.
+        proc = duet("run", "--budget-usd", "0.30", "--max-turns", "6", "t", env={"FC_MODE": "work", "FX_MODE": "loop"})
         assert "BudgetExceeded($0.30)" in proc.stdout
-        assert "Model cost: $" in proc.stdout
+        assert "Model cost: $0.5000 reported; 1 turn(s) with unknown cost" in proc.stdout
+        assert "codex reports no cost" in proc.stdout
+        assert "Turn 4" not in proc.stdout
+
+    def test_completion_on_budget_spending_turn_is_recognised(self, duet):
+        # Budget-before-verification regression: the turn that exhausts the
+        # budget also finishes the task; the checks decide, not the budget.
+        proc = duet("run", "--budget-usd", "0.30", "--verify", "cmd:true", "t", env={"FX_MODE": "loop"})
+        assert "Outcome: success" in proc.stdout
+        assert "BudgetExceeded" not in proc.stdout
 
     def test_cost_reported_on_normal_run(self, duet):
         proc = duet("run", "t")
@@ -303,7 +341,8 @@ class TestPs:
         env = {"XDG_STATE_HOME": str(tmp_path / "state")}
         duet("run", "t", env=env)
         proc = duet("ps", env=env)
-        assert "success" in proc.stdout
+        assert "unverified" in proc.stdout
+        assert "$0.25+?" in proc.stdout  # codex turn cost unknown, shown as such
         assert "Recent duet runs" in proc.stdout
 
 
@@ -326,3 +365,84 @@ class TestLifecycle:
         repo = live_repo(tmp_path)
         proc = duet("talk", "claude", "--new", "--repo", str(repo), stdin="ping")
         assert "turn 1 work" in proc.stdout
+
+
+class TestD01Cli:
+    def test_task_is_required(self, duet):
+        proc = duet("run")
+        assert proc.returncode == 1
+        assert "a task is required" in proc.stderr
+
+    def test_empty_piped_task_is_rejected(self, tmp_path, monkeypatch, capsys):
+        # Bare `duet` with piped stdin routes to `run`; an empty pipe is not a task.
+        import io
+
+        from duet.cli import main
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+        monkeypatch.setattr(sys, "stdin", io.StringIO("   \n"))
+        assert main([]) == 1
+        assert "a task is required" in capsys.readouterr().err
+
+    def test_invalid_numeric_flags_rejected(self, duet):
+        for flag, value in (("--max-turns", "0"), ("--budget-usd", "-1"), ("--budget-usd", "nan"), ("--quota-wait-seconds", "-3")):
+            proc = duet("run", flag, value, "t")
+            assert proc.returncode == 2, (flag, value)  # argparse usage error
+
+    def test_resume_from_inside_scratch_workspace(self, duet, tmp_path):
+        # B7: `cd <workspace> && duet resume` used to be refused as "unsafe cwd".
+        workspace = tmp_path / "scratch"
+        first = duet("run", "--workspace", str(workspace), "t", env={"FX_MODE": "quota"})
+        assert "QuotaExhausted(codex)" in first.stdout
+        (duet.state / "fc-n").unlink(missing_ok=True)
+        proc = duet("resume", cwd=workspace)
+        assert "Resuming duet" in proc.stdout, proc.stderr
+        assert "Outcome: unverified" in proc.stdout
+
+    def test_rollback_spares_unverified_work(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        proc = duet("run", "--repo", str(repo), "--rollback-on-failure", "t", env={"FC_MODE": "edit"})
+        assert "Outcome: unverified" in proc.stdout
+        assert "Not rolled back" in proc.stderr
+        branches = subprocess.run(["git", "branch", "--list", "duet/session-*"], cwd=repo, capture_output=True, text=True).stdout
+        assert branches.strip()
+
+    def test_interrupt_leaves_a_resumable_manifest(self, duet, tmp_path):
+        repo = live_repo(tmp_path)
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "duet", "--config", str(duet.harness_config), "run", "--repo", str(repo), "t"],
+            env={**os.environ, "PATH": f"{duet.harness_bindir}:{os.environ['PATH']}", "BATTERY_STATE": str(duet.state), "FC_MODE": "hang"},
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        deadline = time.monotonic() + 20
+        while not (duet.state / "fc-n").exists() and time.monotonic() < deadline:
+            time.sleep(0.05)  # wait until the fake agent's turn is in flight
+        time.sleep(0.3)
+        proc.send_signal(signal.SIGINT)
+        out, err = proc.communicate(timeout=30)
+        assert proc.returncode == 130, out + err
+        assert "Outcome: interrupted" in out
+        manifest = json.loads((repo / ".duet" / "resume.json").read_text())
+        assert manifest["outcome"] == "interrupted"
+
+    def test_init_refuses_to_clobber(self, duet, tmp_path):
+        (tmp_path / "duet.toml").write_text("# mine\n")
+        proc = duet("init", "--project", cwd=tmp_path)
+        assert proc.returncode == 1 and "already exists" in proc.stderr
+        assert (tmp_path / "duet.toml").read_text() == "# mine\n"
+        assert duet("init", "--project", "--force", cwd=tmp_path).returncode == 0
+
+
+def test_registry_survives_concurrent_writers(tmp_path):
+    code = (
+        "import sys; from pathlib import Path; from duet.registry import register_run, finish_run;"
+        "rid = register_run(Path('/w'), '', 'task ' + sys.argv[1]); finish_run(rid, 'halted')"
+    )
+    env = {**os.environ, "XDG_STATE_HOME": str(tmp_path)}
+    procs = [subprocess.Popen([sys.executable, "-c", code, str(i)], env=env) for i in range(12)]
+    for proc in procs:
+        assert proc.wait(timeout=60) == 0
+    entries = json.loads((tmp_path / "duet" / "runs.json").read_text())
+    assert sorted(e["task_head"] for e in entries) == sorted(f"task {i}" for i in range(12))
+    assert all(e["outcome"] == "halted" for e in entries)

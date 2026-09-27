@@ -84,7 +84,7 @@ def test_repl_scripted_commands_and_task(tmp_path):
     assert repl.run() == 0
     out = stdout.getvalue()
     assert "Next speaker forced" in out
-    assert "Outcome: success" in out
+    assert "Outcome: unverified" in out  # no verifier configured: a claim, not success
     assert "Unknown command" not in out
     assert "Claude <claude@duet.local>" in out
 

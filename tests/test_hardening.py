@@ -143,10 +143,12 @@ def test_pytest_verifier_reports_timeout(tmp_path, monkeypatch):
 
     monkeypatch.setattr(verifiers.shutil, "which", lambda name: "/usr/bin/pytest")
 
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd="pytest", timeout=1)
+    from duet.providers.process import ProcessResult
 
-    monkeypatch.setattr(verifiers.subprocess, "run", fake_run)
+    def fake_run(*args, **kwargs):
+        return ProcessResult(None, "partial", "", 7, 0, False, False, True, 1.0, False)
+
+    monkeypatch.setattr(verifiers, "run_bounded", fake_run)
     result = PytestVerifier(timeout_seconds=1).verify(tmp_path)
     assert result.status == "failed"
     assert "timed out" in result.output

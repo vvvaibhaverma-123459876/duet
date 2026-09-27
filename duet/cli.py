@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import sys
@@ -10,7 +11,8 @@ from pathlib import Path
 
 from . import __version__
 from .adapters import AgentError
-from .broker import run_session
+from .broker import exit_code_for, run_session
+from .prompting import default_roles, demo_roles
 from .config import (
     VALID_COMMIT_MODE,
     VALID_ISOLATE,
@@ -41,6 +43,7 @@ from .workspace import (
     WorkspaceError,
     create_workspace,
     git_log_summary,
+    open_existing_workspace,
     prepare_live_repo,
     release_lock,
     remove_worktree,
@@ -49,6 +52,40 @@ from .workspace import (
 )
 
 log = get_logger()
+
+# Outcomes after which --rollback-on-failure discards the branch. Work that is
+# complete but unverified or awaiting review is never destroyed automatically.
+ROLLBACK_OUTCOMES = {"halted", "interrupted"}
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}")
+    return value
+
+
+def _non_negative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {text!r}") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative integer, got {text!r}")
+    return value
+
+
+def _money(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected an amount in USD, got {text!r}") from None
+    if not math.isfinite(value) or value < 0:
+        raise argparse.ArgumentTypeError(f"expected a finite non-negative amount, got {text!r}")
+    return value
 
 
 DEMO_TASK = """Implement and verify roman_to_int in the seeded workspace.
@@ -116,9 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             help="default=Broker commits each turn; agent-driven=Broker commits nothing, agents' own commits are attributed to them (or set DUET_COMMIT_MODE)",
         )
         run.add_argument("--allow-dirty", action="store_true", help="permit uncommitted changes in the target repo")
-        run.add_argument("--rollback-on-failure", action="store_true", help="discard the duet branch if the session does not succeed")
+        run.add_argument("--rollback-on-failure", action="store_true", help="discard the duet branch if the session halts or is interrupted (unverified/review-pending work is kept)")
         run.add_argument("--start", choices=["claude", "codex"])
-        run.add_argument("--max-turns", type=int)
+        run.add_argument("--max-turns", type=_positive_int)
         run.add_argument(
             "--verify",
             action="append",
@@ -127,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             help="verification gate: pytest, none, or cmd:<shell command>; repeat for an all-must-pass composite",
         )
         run.add_argument("--worktree", action="store_true", help="alias for --isolate worktree")
-        run.add_argument("--budget-usd", type=float, default=None, help="halt when reported model cost reaches this (Claude reports cost; Codex CLI does not)")
+        run.add_argument("--budget-usd", type=_money, default=None, help="halt when reported model cost reaches this (Claude reports cost; Codex CLI does not)")
         run.add_argument("--seed-demo", action="store_true")
         run.add_argument("--interactive-handoff", action="store_true")
         run.add_argument("--output-format", choices=["text", "json"], default="text")
@@ -148,15 +185,15 @@ def main(argv: list[str] | None = None) -> int:
             default=None,
             help="when an agent hits its usage limit: halt cleanly (default), continue solo with the other agent, or wait and retry",
         )
-        run.add_argument("--quota-wait-seconds", type=int, default=None, help="wait interval for --on-quota wait (default 300)")
+        run.add_argument("--quota-wait-seconds", type=_non_negative_int, default=None, help="wait interval for --on-quota wait (default 300)")
 
     sessions = sub.add_parser("sessions", help="list agent CLI sessions available to attach or peek")
     sessions.add_argument("agent", nargs="?", choices=["claude", "codex"], default="claude")
     sessions.add_argument("--repo", default=".", help="repo the sessions belong to (claude only; default: current directory)")
-    sessions.add_argument("--limit", type=int, default=10)
+    sessions.add_argument("--limit", type=_positive_int, default=10)
 
     ps = sub.add_parser("ps", help="list recent duet runs on this machine with their status")
-    ps.add_argument("--limit", type=int, default=15)
+    ps.add_argument("--limit", type=_positive_int, default=15)
 
     status = sub.add_parser("status", help="detect agent sessions and processes relevant to a repo")
     status.add_argument("--repo", default=".", help="repo to inspect (default: current directory)")
@@ -174,13 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     connect.add_argument("--allow-dirty", action="store_true")
     connect.add_argument("--rollback-on-failure", action="store_true")
     connect.add_argument("--start", choices=["claude", "codex"])
-    connect.add_argument("--max-turns", type=int)
+    connect.add_argument("--max-turns", type=_positive_int)
     connect.add_argument("--verify", action="append", default=None, metavar="SPEC")
     connect.add_argument("--worktree", action="store_true")
-    connect.add_argument("--budget-usd", type=float, default=None)
+    connect.add_argument("--budget-usd", type=_money, default=None)
     connect.add_argument("--output-format", choices=["text", "json"], default="text")
     connect.add_argument("--on-quota", choices=["halt", "solo", "wait"], default=None)
-    connect.add_argument("--quota-wait-seconds", type=int, default=None)
+    connect.add_argument("--quota-wait-seconds", type=_non_negative_int, default=None)
 
     resume = sub.add_parser("resume", help="continue the last duet run in a workspace/repo, re-attaching both agents")
     resume.add_argument("task", nargs="?", help="override the continuation prompt (default: continue the saved task)")
@@ -194,15 +231,15 @@ def main(argv: list[str] | None = None) -> int:
         metavar="SECONDS",
         help="poll doctor every SECONDS (default 600) until all saved agents pass, e.g. after a quota halt",
     )
-    resume.add_argument("--max-turns", type=int)
+    resume.add_argument("--max-turns", type=_positive_int)
     resume.add_argument("--verify", action="append", default=None, metavar="SPEC")
     resume.add_argument("--worktree", action="store_true")
-    resume.add_argument("--budget-usd", type=float, default=None)
+    resume.add_argument("--budget-usd", type=_money, default=None)
     resume.add_argument("--start", choices=["claude", "codex"])
     resume.add_argument("--allow-dirty", action="store_true")
     resume.add_argument("--output-format", choices=["text", "json"], default="text")
     resume.add_argument("--on-quota", choices=["halt", "solo", "wait"], default=None)
-    resume.add_argument("--quota-wait-seconds", type=int, default=None)
+    resume.add_argument("--quota-wait-seconds", type=_non_negative_int, default=None)
 
     stop = sub.add_parser("stop", help="stop a running duet, claude, or codex session (asks which if ambiguous)")
     stop.add_argument("kind", nargs="?", choices=["duet", "claude", "codex"], help="what to stop (default: ask)")
@@ -222,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     peek.add_argument("agent", choices=["claude", "codex"])
     peek.add_argument("session_id", nargs="?", help="session to peek (default: most recently active)")
     peek.add_argument("--repo", default=".", help="repo the session belongs to (claude only)")
-    peek.add_argument("--lines", type=int, default=30, help="number of recent events to show")
+    peek.add_argument("--lines", type=_positive_int, default=30, help="number of recent events to show")
 
     replay = sub.add_parser("replay")
     replay.add_argument("transcript_json")
@@ -231,6 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     scope = init.add_mutually_exclusive_group()
     scope.add_argument("--user", action="store_true")
     scope.add_argument("--project", action="store_true")
+    init.add_argument("--force", action="store_true", help="overwrite an existing config file")
 
     args = parser.parse_args(argv)
 
@@ -240,6 +278,16 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_logging(args.log_level, args.log_file)
     _install_signal_handlers()
+
+    if args.command == "init":
+        target = _init_target(args)
+        try:
+            write_config(target, force=args.force)
+        except ConfigError as exc:
+            print(f"Config error: {exc}", file=sys.stderr)
+            return 1
+        print(f"Wrote {target}")
+        return 0
 
     try:
         config = load_config(args.config)
@@ -287,12 +335,6 @@ def main(argv: list[str] | None = None) -> int:
         print(Transcript.load_json(Path(args.transcript_json)).render_markdown(), end="")
         return 0
 
-    if args.command == "init":
-        target = _init_target(args)
-        write_config(target)
-        print(f"Wrote {target}")
-        return 0
-
     if args.command in {"run", "exec"}:
         return _run_headless(args, config)
 
@@ -300,6 +342,15 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_headless(args, config) -> int:
+    task_text = (args.task or "").strip()
+    if not task_text and not args.seed_demo:
+        message = "a task is required: pass it as an argument or on stdin (or use --seed-demo for the demo)"
+        if args.output_format == "json":
+            print(json.dumps({"outcome": "halted", "error": message}, indent=2))
+        else:
+            print(f"Cannot run: {message}", file=sys.stderr)
+        return 1
+
     checks = run_doctor(config)
     if args.output_format == "text":
         print(format_checks(checks))
@@ -327,6 +378,15 @@ def _run_headless(args, config) -> int:
         for agent in agents.values():
             agent.chain_sessions = True
 
+    try:
+        verify_specs = list(getattr(args, "verify", None) or [])
+        if args.seed_demo and not verify_specs:
+            verify_specs = ["pytest"]
+        verifier = build_verifier(verify_specs)
+    except ValueError as exc:
+        print(f"Invalid --verify: {exc}", file=sys.stderr)
+        return 1
+
     live: LiveRepo | None = None
     try:
         isolate = _resolve_isolate(args, config)
@@ -345,6 +405,8 @@ def _run_headless(args, config) -> int:
                 carry=getattr(args, "carry", None),
             )
             workspace = live.workspace
+        elif getattr(args, "resume_workspace", False):
+            workspace = open_existing_workspace(args.workspace)
         else:
             workspace = create_workspace(args.workspace)
     except ConfigError as exc:
@@ -379,28 +441,23 @@ def _run_headless(args, config) -> int:
         if commit_mode == "agent-driven":
             print("Commit mode: agent-driven (Duet injects no commits; agents commit as themselves)")
 
-    success = False
+    outcome = "interrupted"
     run_id = None
     finished = False
     try:
-        task = args.task or DEMO_TASK
+        task = task_text or DEMO_TASK
         if args.seed_demo:
             seed_demo(workspace)
-            task = DEMO_TASK if not args.task else args.task + "\n\n" + DEMO_TASK
+            task = DEMO_TASK if not task_text else task_text + "\n\n" + DEMO_TASK
         start = args.start or config.session.start_with
         if start not in agents:
             start = next(iter(agents))
-        max_turns = args.max_turns or config.session.max_turns
-        verify_specs = list(getattr(args, "verify", None) or [])
-        if args.seed_demo and not verify_specs:
-            verify_specs = ["pytest"]
-        try:
-            verifier = build_verifier(verify_specs)
-        except ValueError as exc:
-            print(f"Invalid --verify: {exc}", file=sys.stderr)
-            return 1
+        max_turns = args.max_turns if args.max_turns is not None else config.session.max_turns
         budget = getattr(args, "budget_usd", None)
         budget = config.session.budget_usd if budget is None else budget
+        quota_wait = getattr(args, "quota_wait_seconds", None)
+        quota_wait = config.session.quota_wait_seconds if quota_wait is None else quota_wait
+        roles = (demo_roles if args.seed_demo else default_roles)(start, list(agents))
         run_id = register_run(workspace, live.branch if live else "", task)
         result = run_session(
             task=task,
@@ -411,22 +468,24 @@ def _run_headless(args, config) -> int:
             wallclock_seconds=config.session.wallclock_seconds,
             loop_threshold=config.session.loop_threshold,
             verifier=verifier,
-            roles=_roles(start),
+            roles=roles,
             on_turn=print if args.output_format == "text" else None,
             require_all_agents_for_success=len(agents) > 1,
             on_quota=getattr(args, "on_quota", None) or config.session.on_quota,
-            quota_wait_seconds=getattr(args, "quota_wait_seconds", None) or config.session.quota_wait_seconds,
+            quota_wait_seconds=quota_wait,
             budget_usd=budget,
             commit_mode=commit_mode,
         )
-        finish_run(run_id, result.outcome, result.session.transcript.total_cost_usd)
+        outcome = result.outcome
+        transcript = result.session.transcript
+        finish_run(run_id, outcome, transcript.total_cost_usd, transcript.cost_unknown_turns)
         finished = True
         try:
             save_resume_state(
                 workspace,
                 ResumeState(
                     task=task,
-                    outcome=result.outcome,
+                    outcome=outcome,
                     stop_condition=result.stop_condition,
                     mode="live" if live else "scratch",
                     workspace=str(workspace),
@@ -442,35 +501,12 @@ def _run_headless(args, config) -> int:
         if args.output_format == "json":
             print(json.dumps(result.to_dict(), indent=2))
         else:
-            print("\n=== Duet summary ===")
-            print(f"Outcome: {result.outcome}")
-            print(f"Stop condition: {result.stop_condition}")
-            if result.session.transcript.total_cost_usd:
-                print(f"Model cost: ${result.session.transcript.total_cost_usd:.4f} (agents that report it; Codex CLI reports none)")
-            for note in result.session.transcript.notes:
-                print(f"Note: {note}")
-            print(f"Workspace: {workspace}")
-            if live:
-                print(f"Branch: {live.branch} (review with `git -C {live.workspace} log {live.branch}` and merge deliberately)")
-            print(f"Transcript JSON: {result.transcript_path}")
-            print(f"Markdown log: {result.markdown_path}")
-            for name, agent in agents.items():
-                if getattr(agent, "session_id", ""):
-                    print(f"Session ({name}): {agent.session_id} (re-attach with --attach {name}={agent.session_id})")
-            if result.session.transcript.error:
-                print(f"Error: {result.session.transcript.error}")
-            print("\nGit log:")
-            print(git_log_summary(workspace))
-            if isinstance(verifier, PytestVerifier):
-                final = verifier.verify(workspace)
-                print("\nFinal pytest:")
-                print(final.output)
-        success = result.outcome == "success"
-        return 0 if success else 2
+            _print_summary(result, workspace, live, agents)
+        return result.exit_code
     except KeyboardInterrupt:
         log.warning("interrupted by signal; shutting down")
         print("\nInterrupted; shutting down cleanly.", file=sys.stderr)
-        return 130
+        return exit_code_for("interrupted")
     finally:
         if run_id and not finished:
             finish_run(run_id, "interrupted")
@@ -482,23 +518,68 @@ def _run_headless(args, config) -> int:
                 f"Review with: git -C {live.workspace} log {live.branch}",
                 file=sys.stderr,
             )
-        elif live and not success:
-            if args.rollback_on_failure:
+        elif live and outcome != "success":
+            if args.rollback_on_failure and outcome in ROLLBACK_OUTCOMES:
                 if live.worktree_of:
                     remove_worktree(live, delete_branch=True)
                     print(f"Rolled back: removed worktree and branch {live.branch}.", file=sys.stderr)
                 else:
                     rollback_live_repo(live)
                     print(f"Rolled back: discarded branch {live.branch}.", file=sys.stderr)
+            elif args.rollback_on_failure:
+                print(
+                    f"Not rolled back: outcome {outcome} means the work exists but still needs verification "
+                    f"or review. Duet branch left at {live.branch}.",
+                    file=sys.stderr,
+                )
             else:
                 print(f"Duet branch left at {live.branch} for inspection.", file=sys.stderr)
-        if live and live.worktree_of and (success or not args.rollback_on_failure):
+        if live and live.worktree_of and (outcome == "success" or not (args.rollback_on_failure and outcome in ROLLBACK_OUTCOMES)):
             print(
                 f"Worktree kept at {live.workspace}; branch {live.branch} is in {live.worktree_of}. "
                 f"Clean up with: git -C {live.worktree_of} worktree remove {live.workspace}",
                 file=sys.stderr,
             )
         release_lock(workspace)
+
+
+OUTCOME_EXPLANATIONS = {
+    "success": "verified: the configured checks passed on the final workspace",
+    "unverified": "an agent reported completion, but no configured check verified it (pass --verify)",
+    "review_pending": "implemented, but a partner dropped for quota still owes review; resume when its limit resets",
+    "halted": "stopped before completion",
+    "interrupted": "stopped by signal; artifacts and resume manifest were saved",
+}
+
+
+def _print_summary(result, workspace: Path, live, agents: dict) -> None:
+    transcript = result.session.transcript
+    print("\n=== Duet summary ===")
+    print(f"Outcome: {result.outcome} ({OUTCOME_EXPLANATIONS.get(result.outcome, '')})")
+    print(f"Stop condition: {result.stop_condition}")
+    print(f"Model cost: {transcript.cost_summary()}")
+    for label, record in (("Baseline verification", transcript.baseline_verification), ("Final verification", transcript.final_verification)):
+        if record:
+            print(f"{label}: {record.get('status')} ({record.get('verifier')})")
+    for note in transcript.notes:
+        print(f"Note: {note}")
+    print(f"Workspace: {workspace}")
+    if live:
+        print(f"Branch: {live.branch} (review with `git -C {live.workspace} log {live.branch}` and merge deliberately)")
+    print(f"Transcript JSON: {result.transcript_path}")
+    print(f"Markdown log: {result.markdown_path}")
+    for name, agent in agents.items():
+        session_id = getattr(agent, "session_id", "") or getattr(agent, "last_session_id", "")
+        if session_id:
+            print(f"Session ({name}): {session_id} (re-attach with --attach {name}={session_id})")
+    if transcript.error:
+        print(f"Error: {transcript.error}")
+    print("\nGit log:")
+    print(git_log_summary(workspace))
+    final = transcript.final_verification
+    if final and final.get("status") != "unknown" and final.get("output"):
+        print(f"\nFinal verification output ({final.get('verifier')}):")
+        print(final["output"])
 
 
 def _resolve_isolate(args, config) -> str:
@@ -635,6 +716,8 @@ def _resume(args, config) -> int:
     run_args = argparse.Namespace(
         task=task,
         workspace=None if state.mode == "live" else str(workspace),
+        # A scratch workspace is re-opened as-is (it may be the cwd), never recreated.
+        resume_workspace=state.mode != "live",
         repo=str(workspace) if state.mode == "live" else None,
         branch=None,
         allow_dirty=args.allow_dirty,
@@ -838,14 +921,6 @@ def _init_target(args) -> Path:
     if args.user:
         return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "duet" / "config.toml"
     return Path.cwd() / "duet.toml"
-
-
-def _roles(start: str) -> dict[str, str]:
-    other = "codex" if start == "claude" else "claude"
-    return {
-        start: "You are the Implementer. Edit source files to implement the requested behavior, run tests when useful, then hand off.",
-        other: "You are the Verifier. Add edge-case tests to test_roman.py and review the implementation for bugs, reporting issues back.",
-    }
 
 
 if __name__ == "__main__":

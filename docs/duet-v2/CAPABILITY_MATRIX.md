@@ -31,16 +31,16 @@ compatibility.
 | R03 | Two-way initiative | D05 | NOT_STARTED |
 | R04 | One objective/contract | D02, D06 | NOT_STARTED |
 | R05 | Bounded autonomy | D02, D03 | LEGACY_PARTIAL (branch isolation only) |
-| R06 | Honest resources | D01, D07 | NOT_STARTED |
+| R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
 | R07 | Completion reserve | D08 | NOT_STARTED |
 | R08 | Supported controls only | D04, D09 | NOT_STARTED |
-| R09 | Evidence-based completion | D01, D03, D10 | NOT_STARTED |
+| R09 | Evidence-based completion | D01, D03, D10 | LEGACY: TESTED_SIM (`success` requires a passing verifier; DONE alone is `unverified`); v2 NOT_STARTED |
 | R10 | Revision integrity | D03, D10 | NOT_STARTED |
 | R11 | Safe writes | D03, D11 | LEGACY_PARTIAL (lock + branch/worktree) |
 | R12 | Recoverability | D02, D11 | LEGACY_PARTIAL (resume manifest) |
 | R13 | No silent paid fallback | D04, D08 | LEGACY_PARTIAL (no fallback exists) |
-| R14 | No weakened standards | D01, D08 | NOT_STARTED (solo mode drops review) |
-| R15 | Compatibility | D01, D13 | NOT_STARTED |
+| R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2 NOT_STARTED |
+| R15 | Compatibility | D01, D13 | LEGACY_PARTIAL (documented outcome/exit-code change D-002; v1 transcript migration) |
 
 ## Acceptance tests
 
@@ -66,8 +66,8 @@ compatibility.
 | AT18 | User pins model/effort | D09/D12 | | NOT_STARTED |
 | AT19 | Missing dependency failure | D09 | | NOT_STARTED |
 | AT20 | Repeated no-progress repairs | D06/D09 | | NOT_STARTED |
-| AT21 | Old green suite, feature absent | D01/D10 | | NOT_STARTED |
-| AT22 | DONE with missing verifier | D01 | | NOT_STARTED |
+| AT21 | Old green suite, feature absent | D01/D10 | `test_d01_semantics.py::TestCompletion::test_suite_green_at_baseline_does_not_end_the_session` | LEGACY: TESTED_SIM (no acceptance contract yet: D10) |
+| AT22 | DONE with missing verifier | D01 | `test_d01_semantics.py::TestCompletion::test_done_with_missing_verifier_is_unverified`, battery `test_scratch_run_without_verifier_is_unverified` | TESTED_SIM |
 | AT23 | Approval of old revision | D10 | | NOT_STARTED |
 | AT24 | Agent edits acceptance policy | D03/D10 | | NOT_STARTED |
 | AT25 | Joint authorship reviews | D10 | | NOT_STARTED |
@@ -76,14 +76,14 @@ compatibility.
 | AT28 | Concurrent writers | D11 | | NOT_STARTED |
 | AT29 | Crash around dispatch | D02/D11 | | NOT_STARTED |
 | AT30 | Crash during commit/integration | D11 | | NOT_STARTED |
-| AT31 | Cancel while waiting/working/verifying | D04/D11 | | NOT_STARTED |
+| AT31 | Cancel while waiting/working/verifying | D04/D11 | `test_process.py` interrupt/timeout, `TestInterrupt`, battery `test_interrupt_leaves_a_resumable_manifest` | LEGACY: TESTED_SIM (working); waiting/verifying: v2 |
 | AT32 | PID reuse / unrelated sessions | D11 | | LEGACY_PARTIAL (`stop` confirms; name matching) |
 | AT33 | Peer text claims user approval | D02/D13 | | NOT_STARTED |
-| AT34 | Malformed/flooded provider output | D04 | | NOT_STARTED |
+| AT34 | Malformed/flooded provider output | D04 | `test_process.py::test_flooding_child_is_bounded_at_capture`, `TestAdapter::test_json_output_over_the_cap_is_a_structured_failure` | LEGACY: TESTED_SIM; v2 streaming adapters: D04 |
 | AT35 | Unknown/failed/skipped required check | D03/D10 | | NOT_STARTED |
 | AT36 | Inputs mutate during verification | D03 | | NOT_STARTED |
 | AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
-| AT38 | Wheel without source tree | D13 | | NOT_STARTED (baseline: **fails**) |
+| AT38 | Wheel without source tree | D13 | `test_packaging.py` | TESTED_SIM for defaults (migrations/skills added as they land) |
 | AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |
 | AT40 | Quota reset with stale telemetry | D08/D11 | | NOT_STARTED |
 | AT41 | Mid-turn setting change unsupported | D04/D09 | | NOT_STARTED |
