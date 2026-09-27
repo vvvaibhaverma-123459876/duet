@@ -72,6 +72,19 @@ class TestEndpoint:
         finally:
             service.close()
 
+    def test_the_short_socket_does_not_depend_on_tmpdir(self, tmp_path, monkeypatch):
+        """macOS CI: proxies started by an MCP client have no TMPDIR, so a
+        socket placed under tempfile.gettempdir() was looked for in two places."""
+        import tempfile
+
+        deep = tmp_path.joinpath(*["nested-directory-name"] * 6) / "state"
+        before = ServicePaths.for_root(deep).socket
+        other = tmp_path / "elsewhere"
+        other.mkdir(mode=0o700)
+        monkeypatch.setenv("TMPDIR", str(other))
+        monkeypatch.setattr(tempfile, "tempdir", None)  # gettempdir() re-reads TMPDIR
+        assert ServicePaths.for_root(deep).socket == before
+
     def test_authentication_rules(self, paths, tmp_path):
         service = start(paths)
         try:

@@ -112,13 +112,23 @@ class ServicePaths:
         if len(os.fsencode(str(sock))) > UNIX_PATH_LIMIT:
             # Deep state dirs exceed sun_path; use a short private directory
             # keyed by the state dir instead.
-            short = ensure_private_dir(Path(tempfile.gettempdir()) / f"duet-{os.getuid() if hasattr(os, 'getuid') else 'u'}")
+            short = ensure_private_dir(_socket_base() / f"duet-{os.getuid() if hasattr(os, 'getuid') else 'u'}")
             sock = short / (hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:20] + ".sock")
         return cls(
             root=root, db=root / "duet.db", artifacts=root / "artifacts", pairs=root / "pairs", lock=root / "service.lock",
             spawn_lock=root / "service.spawn.lock", info=root / "service.json", secret=root / "service.secret",
             log=root / "service.log", socket=sock,
         )
+
+
+def _socket_base() -> Path:
+    """Where short sockets live. It must not depend on the environment: the
+    MCP client starts proxies with a minimal environment (no TMPDIR), and
+    managed peers get an allowlisted one, so `tempfile.gettempdir()` differs
+    between processes on macOS (TMPDIR=/var/folders/...) and a proxy would
+    look for the service in the wrong place. /tmp is short and fixed; the
+    per-user directory under it is checked to be private and ours."""
+    return Path("/tmp") if os.path.isdir("/tmp") else Path(tempfile.gettempdir())
 
 
 def _write_private(path: Path, text: str) -> None:
