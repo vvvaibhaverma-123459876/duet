@@ -11,11 +11,16 @@ thread.started{thread_id}, turn.started, item.started/updated/completed
 Limits, reported honestly: no model catalogue (model is accepted but not
 observable), effort only through `-c model_reasoning_effort=...` (advisory),
 per-turn tokens only, no cost, no rate-limit windows, cancellation by
-signal only."""
+signal only.
+
+Provider credential variables (OPENAI_API_KEY, CODEX_API_KEY, ...; see
+process.PROVIDER_CREDENTIAL_ENV) are removed from the child environment so
+Codex runs on the user's login, never on API billing, unless the adapter is
+constructed with `allow_api_key_env=True` (explicit opt-in; DUET never sets
+it). Removed names, never values, are reported in the turn's warnings."""
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 
@@ -32,7 +37,7 @@ from .base import (
     int_or_none,
     lineage_for,
 )
-from .process import stream_process
+from .process import credential_env_warning, provider_child_env, stream_process
 
 SANDBOX_FOR_PROFILE = {"workspace_write": "workspace-write", "read_only": "read-only"}
 
@@ -40,10 +45,20 @@ SANDBOX_FOR_PROFILE = {"workspace_write": "workspace-write", "read_only": "read-
 class CodexExecAdapter:
     name = "codex"
 
-    def __init__(self, binary: str = "codex", *, env: dict[str, str] | None = None, version: str | None = None) -> None:
+    def __init__(
+        self,
+        binary: str = "codex",
+        *,
+        env: dict[str, str] | None = None,
+        version: str | None = None,
+        allow_api_key_env: bool = False,
+    ) -> None:
+        """`allow_api_key_env=True` keeps provider API keys in the child
+        environment (API billing); off by default, never set by DUET."""
         self.binary = binary
         self.env = env
         self._version = version
+        self.allow_api_key_env = allow_api_key_env
 
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
@@ -100,11 +115,7 @@ class CodexExecAdapter:
             prompt = request.prompt
         cmd, requested, accepted = self.build_command(request)
         state = _ExecState(on_event)
-        env = None
-        if self.env or request.env:
-            env = dict(os.environ)
-            env.update(self.env or {})
-            env.update(request.env or {})
+        env, removed_env = provider_child_env(self.env, request.env, allow_api_key_env=self.allow_api_key_env)
         started = time.monotonic()
         try:
             proc = stream_process(cmd, on_line=state.feed, cwd=request.cwd, env=env, stdin_data=prompt, timeout=request.timeout_seconds, cancel_event=cancel)
@@ -121,7 +132,7 @@ class CodexExecAdapter:
             provider_invocation_id=state.thread_id,
             events=state.events,
         )
-        warnings = tuple(state.warnings)
+        warnings = tuple(state.warnings) + ((credential_env_warning(removed_env),) if removed_env else ())
         if proc.over_limit:
             return TurnResult(status="failed", text=state.text, error=OutputLimitError("codex: event stream exceeded the capture limit"), warnings=warnings, **common)
         if proc.timed_out:

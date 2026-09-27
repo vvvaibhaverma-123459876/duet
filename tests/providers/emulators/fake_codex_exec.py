@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Emulator for `codex exec --json` (event names from codex-rs exec_events.rs;
 the network-denied failure path replays the recorded 0.157.1 output).
-Mode via FAKE_CODEX_EXEC_MODE: success | network_denied | failed | hang"""
+Mode via FAKE_CODEX_EXEC_MODE: success | network_denied | failed | hang |
+env (the reply lists the names of the environment variables it got)"""
 import json
 import os
 import sys
@@ -39,5 +40,6 @@ if MODE == "failed":
     sys.exit(1)
 emit({"type": "error", "message": "Reconnecting... 1/5 (stream disconnected before completion)"})
 emit({"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "thinking"}})
-emit({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": f"exec reply to: {prompt[:20]}"}})
+reply = ("env: " + json.dumps(sorted(os.environ))) if MODE == "env" else f"exec reply to: {prompt[:20]}"
+emit({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": reply}})
 emit({"type": "turn.completed", "usage": {"input_tokens": 500, "cached_input_tokens": 100, "cache_write_input_tokens": 0, "output_tokens": 40, "reasoning_output_tokens": 12}})

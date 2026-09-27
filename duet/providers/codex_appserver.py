@@ -16,10 +16,16 @@ tests/fixtures/provider_protocols/codex/0.157.1/schema-subset.json):
 Threads persist across turns in one app-server process. Model and effort are
 applied per turn (turn/start) after validation against model/list: an effort
 the chosen model does not advertise is refused before dispatch, not sent and
-hoped for. Codex reports tokens and rate-limit windows but no cost."""
+hoped for. Codex reports tokens and rate-limit windows but no cost.
+
+The app-server's environment is fixed when the process starts, so provider
+credential variables (OPENAI_API_KEY, CODEX_API_KEY, ...; see
+process.PROVIDER_CREDENTIAL_ENV) are removed there: Codex runs on the user's
+login, never on API billing, unless the adapter is constructed with
+`allow_api_key_env=True` (explicit opt-in; DUET never sets it). The removed
+names, never values, are reported in every turn's warnings."""
 from __future__ import annotations
 
-import os
 import re
 import threading
 import time
@@ -39,6 +45,7 @@ from .base import (
     lineage_for,
 )
 from .jsonrpc import JsonRpcError, JsonRpcProcess, ProcessGone
+from .process import credential_env_warning, provider_child_env
 
 CLIENT_NAME = "duet"
 INTERRUPT_GRACE_SECONDS = 10.0
@@ -64,8 +71,13 @@ class CodexAppServerAdapter:
         env: dict[str, str] | None = None,
         client_version: str = "0.1.0",
         request_timeout: float = 60.0,
+        allow_api_key_env: bool = False,
     ) -> None:
+        """`allow_api_key_env=True` keeps provider API keys in the app-server's
+        environment (API billing); off by default, never set by DUET."""
         self.binary = binary
+        self.allow_api_key_env = allow_api_key_env
+        self.removed_env: tuple[str, ...] = ()
         self.config_overrides = tuple(config_overrides)
         self.env = env
         self.client_version = client_version
@@ -85,10 +97,7 @@ class CodexAppServerAdapter:
         for override in self.config_overrides:
             argv += ["-c", override]
         argv.append("app-server")
-        env = None
-        if self.env:
-            env = dict(os.environ)
-            env.update(self.env)
+        env, self.removed_env = provider_child_env(self.env, allow_api_key_env=self.allow_api_key_env)
         try:
             self._rpc = JsonRpcProcess(argv, env=env, on_notification=self._on_notification, on_server_request=self._on_server_request)
         except FileNotFoundError as exc:
@@ -235,28 +244,34 @@ class CodexAppServerAdapter:
         if request.effort:
             params["effort"] = request.effort
             accepted["effort"] = request.effort
-        try:
-            started_turn = rpc.request("turn/start", params, timeout=self.request_timeout)
-        except JsonRpcError as exc:
-            raise classify_failure("codex", None, "turn/start", exc.message, "") from exc
-        turn_id = (started_turn.get("turn") or {}).get("id")
-        collector = _TurnCollector(thread_id, turn_id, on_event)
+        # The collector is installed before turn/start is sent: the server may
+        # emit the turn's notifications (a fast `error` + `turn/completed`)
+        # before it answers the request. Until the turn id is known, events for
+        # this thread are accepted; the id is then bound from the response (or
+        # from turn/started, whichever arrives first).
+        collector = _TurnCollector(thread_id, None, on_event)
         self._collector = collector
-        deadline = started + request.timeout_seconds
         status = "completed"
         interrupted_by_us = False
         try:
-            while collector.completed is None:
-                if cancel is not None and cancel.is_set() or time.monotonic() >= deadline:
-                    status = "timeout" if time.monotonic() >= deadline else "cancelled"
-                    interrupted_by_us = True
-                    self._interrupt(thread_id, turn_id, collector)
-                    break
-                rpc.pump(timeout=0.5, stop=lambda: collector.completed is not None)
-        except ProcessGone as exc:
-            self._rpc = None
-            error = AgentError(f"codex: app-server exited during the turn: {exc}", kind="error")
-            return self._result("failed", collector, requested, accepted, observed, request, started, error)
+            try:
+                started_turn = rpc.request("turn/start", params, timeout=self.request_timeout)
+            except JsonRpcError as exc:
+                raise classify_failure("codex", None, "turn/start", exc.message, "") from exc
+            collector.bind_turn((started_turn.get("turn") or {}).get("id"))
+            deadline = started + request.timeout_seconds
+            try:
+                while collector.completed is None:
+                    if cancel is not None and cancel.is_set() or time.monotonic() >= deadline:
+                        status = "timeout" if time.monotonic() >= deadline else "cancelled"
+                        interrupted_by_us = True
+                        self._interrupt(thread_id, collector.turn_id, collector)
+                        break
+                    rpc.pump(timeout=0.5, stop=lambda: collector.completed is not None)
+            except ProcessGone as exc:
+                self._rpc = None
+                error = AgentError(f"codex: app-server exited during the turn: {exc}", kind="error")
+                return self._result("failed", collector, requested, accepted, observed, request, started, error)
         finally:
             self._collector = None
         if interrupted_by_us:
@@ -286,6 +301,8 @@ class CodexAppServerAdapter:
     def _result(self, status, collector, requested, accepted, observed, request, started, error) -> TurnResult:
         usage = list(collector.usage)
         warnings = list(collector.warnings)
+        if self.removed_env:
+            warnings.append(credential_env_warning(self.removed_env))
         if self.declined_requests:
             warnings.append(f"declined {len(self.declined_requests)} approval/input request(s): {sorted(set(self.declined_requests))}")
             self.declined_requests = []
@@ -334,6 +351,16 @@ class _TurnCollector:
         self.last_error: str | None = None
         self.events = 0
 
+    def bind_turn(self, turn_id: str | None) -> None:
+        """Adopt the id from the turn/start response. Events that arrived
+        earlier were accepted for the whole thread; a completion recorded for
+        a different turn is not this turn's and is dropped."""
+        if not turn_id:
+            return
+        self.turn_id = turn_id
+        if self.completed is not None and self.completed.get("id") not in (None, turn_id):
+            self.completed = None
+
     def _mine(self, params: dict) -> bool:
         if params.get("threadId") not in (None, self.thread_id):
             return False
@@ -360,7 +387,11 @@ class _TurnCollector:
         elif method == "thread/tokenUsage/updated":
             usage = params.get("tokenUsage") or {}
             self.usage = [u for u in self.usage if u.source != "codex.thread.tokenUsage"]
-            self.usage += _token_observations(usage.get("last") or {}, "turn", message.get("emittedAtMs"))
+            # ThreadTokenUsage in the 0.157.1 schema has only `last` (the most
+            # recent model request) and `total` (thread cumulative); there is
+            # no per-turn field. A turn can make several requests, so `last`
+            # is a per-call figure, never the turn's total.
+            self.usage += _token_observations(usage.get("last") or {}, "call", message.get("emittedAtMs"))
             self.usage += _token_observations(usage.get("total") or {}, "thread_cumulative", message.get("emittedAtMs"))
             window = int_or_none(usage.get("modelContextWindow"))
             if window is not None:

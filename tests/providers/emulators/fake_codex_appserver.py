@@ -8,7 +8,9 @@ fields the real server sends. Turn events follow the generated v2 schema.
 
 Behaviour is selected with FAKE_CODEX_MODE:
   success | fail | hang | approval | malformed | die | ignore_interrupt |
-  ratelimited (account/rateLimits/read succeeds)"""
+  ratelimited (account/rateLimits/read succeeds) |
+  early_fail (the turn fails with a usage-limit error *before* the turn/start
+  response is sent) | env (the reply lists the server's environment names)"""
 import json
 import os
 import sys
@@ -111,6 +113,13 @@ def handle(msg):
         n = turn_counter[0]
         thread_id = params["threadId"]
         turn_id = f"turn-{n}"
+        if MODE == "early_fail":
+            # A fast failure: the turn's notifications precede the response.
+            send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
+            send({"method": "error", "params": {"threadId": thread_id, "turnId": turn_id, "willRetry": False, "error": {"message": "You've hit your usage limit."}}})
+            complete_turn(thread_id, turn_id, "failed", {"message": "You've hit your usage limit."})
+            send({"id": rid, "result": {"turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
+            return
         send({"id": rid, "result": {"turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
         send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
         if MODE == "malformed":
@@ -144,6 +153,8 @@ def handle(msg):
             complete_turn(thread_id, turn_id, "failed", {"message": "You've hit your usage limit."})
             return
         reply = f"echo: {text[:40]} model={params.get('model')} effort={params.get('effort')}"
+        if MODE == "env":
+            reply = "env: " + json.dumps(sorted(os.environ))
         send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "completedAtMs": 1, "item": {"type": "agentMessage", "id": "a1", "text": reply, "phase": None}}})
         complete_turn(thread_id, turn_id)
     elif method == "turn/interrupt":

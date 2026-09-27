@@ -9,9 +9,23 @@ from pathlib import Path
 
 import pytest
 
-from duet.providers.process import BoundedBuffer, run_bounded
+from duet.providers.process import BoundedBuffer, run_bounded, stream_process
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="process-group semantics are POSIX-only here")
+
+
+def _wait_dead(pid: int, seconds: float = 5.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _alive(pid)
+
+
+def _reap(pid: int) -> None:
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
 
 
 def _alive(pid: int) -> bool:
@@ -114,6 +128,21 @@ class TestRunBounded:
             time.sleep(0.05)
         assert not _alive(orphan)
 
+    def test_detached_grandchild_is_killed_after_normal_exit(self, tmp_path):
+        # Review finding: the group was only killed on timeout or while a
+        # reader was blocked. A background grandchild with its stdio redirected
+        # away never holds our pipes, so it survived a normal leader exit.
+        pidfile = tmp_path / "bg.pid"
+        script = f"sleep 30 </dev/null >/dev/null 2>&1 & echo $! > {pidfile}; echo done"
+        result = run_bounded(["/bin/sh", "-c", script], cwd=tmp_path, timeout=30, drain_grace=0.5)
+        grandchild = int(pidfile.read_text())
+        try:
+            assert result.returncode == 0 and "done" in result.stdout
+            assert not result.output_incomplete  # the pipes were never held
+            assert _wait_dead(grandchild), "background grandchild outlived run_bounded"
+        finally:
+            _reap(grandchild)
+
     def test_keyboard_interrupt_kills_child_and_propagates(self, tmp_path, monkeypatch):
         pidfile = tmp_path / "child.pid"
         calls = {"n": 0}
@@ -150,3 +179,60 @@ def test_stdin_defaults_to_devnull(tmp_path: Path):
     # Arg-mode agents must not inherit (and block on) Duet's own stdin.
     result = run_bounded([sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"], cwd=tmp_path, timeout=10)
     assert result.stdout.strip() == "''"
+
+
+class TestStreamProcess:
+    """Review finding: with interrupt_first, escalation required a live
+    leader, so a SIGINT-ignoring descendant holding stdout after the leader
+    exited kept stream_process (and its timeout) waiting indefinitely."""
+
+    @staticmethod
+    def _script(pidfile: Path) -> str:
+        # The leader prints a line and exits; a descendant that ignores SIGINT
+        # inherits stdout and keeps it open for 30 s.
+        return f"(trap '' INT; sleep 30) & echo $! > {pidfile}; echo started"
+
+    def test_lingering_descendant_is_killed_after_drain_grace(self, tmp_path):
+        pidfile = tmp_path / "desc.pid"
+        lines: list[str] = []
+        started = time.monotonic()
+        result = stream_process(
+            ["/bin/sh", "-c", self._script(pidfile)], on_line=lines.append, cwd=tmp_path,
+            timeout=30, interrupt_first=True, term_grace=0.5, drain_grace=0.5,
+        )
+        descendant = int(pidfile.read_text())
+        try:
+            assert time.monotonic() - started < 10
+            assert lines == ["started"] and result.returncode == 0 and not result.timed_out
+            assert _wait_dead(descendant)
+        finally:
+            _reap(descendant)
+
+    def test_timeout_escalates_after_leader_exit(self, tmp_path):
+        # With a long drain grace the only way out is the deadline: SIGINT is
+        # ignored, the leader is already gone, and escalation must still happen.
+        pidfile = tmp_path / "desc.pid"
+        started = time.monotonic()
+        result = stream_process(
+            ["/bin/sh", "-c", self._script(pidfile)], on_line=lambda line: None, cwd=tmp_path,
+            timeout=2, interrupt_first=True, term_grace=0.5, drain_grace=60,
+        )
+        descendant = int(pidfile.read_text())
+        try:
+            assert result.timed_out
+            assert time.monotonic() - started < 10, "timeout was ignored"
+            assert _wait_dead(descendant)
+        finally:
+            _reap(descendant)
+
+    def test_detached_descendant_is_killed_after_normal_exit(self, tmp_path):
+        pidfile = tmp_path / "bg.pid"
+        script = f"sleep 30 </dev/null >/dev/null 2>&1 & echo $! > {pidfile}; echo done"
+        lines: list[str] = []
+        result = stream_process(["/bin/sh", "-c", script], on_line=lines.append, cwd=tmp_path, timeout=30)
+        grandchild = int(pidfile.read_text())
+        try:
+            assert lines == ["done"] and result.returncode == 0
+            assert _wait_dead(grandchild)
+        finally:
+            _reap(grandchild)

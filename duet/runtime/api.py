@@ -1028,7 +1028,10 @@ class Runtime:
         row = tx.get("leases", resource)
         if row is not None and row["owner"] is not None and row["owner"] != owner:
             expired = row["expires_at"] is not None and parse_utc(row["expires_at"]) <= self._now()
-            if not expired and not owner_is_dead(row["owner"]):
+            # Inside a write transaction: the liveness check must never spawn
+            # a subprocess (sysctl/ps where /proc is missing). Without /proc it
+            # is conservative; reconcile() does the full check outside the tx.
+            if not expired and not owner_is_dead(row["owner"], allow_subprocess=False):
                 raise Conflict(f"{resource} is leased to another owner until {row['expires_at']}", details={"owner": row["owner"]})
         token = (row["fencing_token"] if row else 0) + 1
         tx.emit(
@@ -1066,11 +1069,19 @@ class Runtime:
         automatically. Undispatched (RESERVED) work stays ready."""
         self._require_trusted(principal, "reconcile runtime state")
         report: dict[str, list[str]] = {"released_leases": [], "in_doubt": []}
+        # Judge owner liveness before the write transaction: the full check may
+        # spawn `ps`/`sysctl` where /proc is unavailable, which must never
+        # happen while the transaction holds the database's write lock.
+        dead_owned = self._leases_with_dead_owners()
         with self.store.transaction() as tx:
             now = self._now()
             for lease in tx.query("SELECT * FROM leases WHERE owner IS NOT NULL"):
                 expired = lease["expires_at"] is not None and parse_utc(lease["expires_at"]) <= now
-                if not (expired or owner_is_dead(lease["owner"])):
+                # A dead-owner verdict applies only to the exact lease that was
+                # judged: if the owner or fencing token changed in between, the
+                # lease was re-acquired and is left alone.
+                judged_dead = (lease["resource"], lease["owner"], lease["fencing_token"]) in dead_owned
+                if not (expired or judged_dead):
                     continue
                 resource = lease["resource"]
                 if resource.startswith("action:"):
@@ -1083,6 +1094,20 @@ class Runtime:
                 tx.emit(self._event("lease.released", {"resource": resource, "fencing_token": lease["fencing_token"]}, principal, None))
                 report["released_leases"].append(resource)
         return report
+
+    def _leases_with_dead_owners(self) -> set[tuple[str, str, int]]:
+        """(resource, owner, fencing_token) of held leases whose owner process
+        is provably dead. Runs outside any transaction (it may spawn `ps`)."""
+        rows = self.store.read().query("SELECT resource, owner, fencing_token FROM leases WHERE owner IS NOT NULL")
+        verdicts: dict[str, bool] = {}
+        dead: set[tuple[str, str, int]] = set()
+        for row in rows:
+            owner = row["owner"]
+            if owner not in verdicts:
+                verdicts[owner] = owner_is_dead(owner)
+            if verdicts[owner]:
+                dead.add((row["resource"], owner, row["fencing_token"]))
+        return dead
 
     # ------------------------------------------------------------------ status
 

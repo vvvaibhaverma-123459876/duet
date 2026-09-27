@@ -6,9 +6,15 @@ time, so an old lease can be attributed to a dead owner reliably.
 
 Participant tokens are random secrets returned once at registration and
 stored only as SHA-256 hashes. They are passed to MCP proxies through the
-environment or a 0600 file, never on the command line."""
+environment or a 0600 file, never on the command line.
+
+Where /proc is unavailable (macOS), the boot id and process start times come
+from `sysctl`/`ps`. The runtime store forbids waiting on a subprocess inside a
+write transaction, so callers there use `is_alive(allow_subprocess=False)`,
+which never spawns; the boot id is read once per process and cached."""
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import os
@@ -34,7 +40,15 @@ def tokens_match(token: str, stored_hash: str) -> bool:
     return hmac.compare_digest(hash_token(token), stored_hash)
 
 
+def _has_procfs() -> bool:
+    """True when process information can be read from /proc without a subprocess."""
+    return Path("/proc/self/stat").exists()
+
+
+@functools.lru_cache(maxsize=1)
 def boot_id() -> str:
+    """The kernel boot id. It cannot change while this process runs, so it is
+    computed once per process (on macOS that costs a `sysctl` subprocess)."""
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     except OSError:
@@ -49,9 +63,15 @@ def boot_id() -> str:
 
 
 def process_start(pid: int) -> str | None:
-    """Kernel start time of `pid`, or None if the process does not exist."""
+    """Kernel start time of `pid`, or None if the process does not exist.
+    Spawns `ps` only where /proc is unavailable."""
+    if pid <= 0:
+        return None
     stat_path = Path(f"/proc/{pid}/stat")
-    if stat_path.exists():
+    procfs = _has_procfs()
+    if procfs and not stat_path.exists():
+        return None  # /proc lists every process we could judge: this one is gone
+    if procfs:
         try:
             raw = stat_path.read_text(encoding="utf-8")
         except OSError:
@@ -102,22 +122,44 @@ class ProcessIdentity:
         MCP server). The start time distinguishes a reused pid."""
         return cls(socket.gethostname(), boot_id(), pid, process_start(pid) or "unknown")
 
-    def is_alive(self) -> bool:
+    def is_alive(self, allow_subprocess: bool = True) -> bool:
         """True only if this exact process (same host, boot, pid and start
         time) still runs. Unknown hosts are treated as alive: another machine's
-        process cannot be judged dead from here."""
+        process cannot be judged dead from here.
+
+        With `allow_subprocess=False` no subprocess is ever spawned (required
+        inside a store transaction). Where /proc is available the answer is the
+        same; elsewhere the check degrades conservatively: the process is dead
+        only if its boot id (when already cached) differs or its pid does not
+        exist at all; otherwise it is assumed alive."""
         if self.host != socket.gethostname():
             return True
+        if not allow_subprocess and not _has_procfs():
+            if boot_id.cache_info().currsize and self.boot != boot_id():
+                return False
+            return _pid_exists(self.pid)
         if self.boot != boot_id():
             return False
         start = process_start(self.pid)
         return start is not None and start == self.start
 
 
-def owner_is_dead(owner: str | None) -> bool:
+def _pid_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True  # exists but not ours (EPERM), or cannot tell: assume alive
+    return True
+
+
+def owner_is_dead(owner: str | None, *, allow_subprocess: bool = True) -> bool:
     if not owner:
         return True
     identity = ProcessIdentity.parse(owner)
     if identity is None:
         return False  # not a process identity (e.g. a principal id): cannot judge
-    return not identity.is_alive()
+    return not identity.is_alive(allow_subprocess=allow_subprocess)

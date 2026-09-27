@@ -23,8 +23,11 @@ output_format = "json"
 result_json_path = "result"
 session_json_path = "session_id"
 cost_json_path = "total_cost_usd"
-# Claude Code >= 2.1.277 reports a resumed session's whole spend, not the call's.
-cost_json_scope = "session_cumulative_on_resume"
+# Claude Code >= 2.1.277 reports a resumed session's whole spend, not the call's;
+# older versions report the call's own cost. "auto" reads `claude --version` once
+# per process and picks the matching reading (an unreadable version makes a
+# resumed turn's cost unknown). Set "call" or "session_cumulative_on_resume" to pin it.
+cost_json_scope = "auto"
 resume_command = ["claude", "-p", "--output-format", "json", "--dangerously-skip-permissions", "--resume", "{session_id}"]
 model = ""
 timeout_seconds = 300

@@ -209,9 +209,12 @@ class TestCodexAppServer:
         assert result.ok and "model=gpt-6-sol effort=high" in result.text
         assert result.lineage == "new" and result.session_id == "thr-1"
         assert result.settings.accepted["sandbox"] == "workspace-write" and result.settings.accepted["approval_policy"] == "never"
-        turn_tokens = {u.metric: u.value for u in result.usage if u.scope == "turn"}
+        # tokenUsage.last is the most recent model request, not the turn: the
+        # 0.157.1 schema has no per-turn field, so nothing is labelled "turn".
+        call_tokens = {u.metric: u.value for u in result.usage if u.scope == "call"}
         cumulative = {u.metric: u.value for u in result.usage if u.scope == "thread_cumulative"}
-        assert turn_tokens["tokens.input"] == 100 and cumulative["tokens.input"] == 300
+        assert call_tokens["tokens.input"] == 100 and cumulative["tokens.input"] == 300
+        assert not [u for u in result.usage if u.scope == "turn"]
         assert not any(u.metric == "cost_usd" for u in result.usage)  # codex reports no cost
         assert any(u.metric == "quota.used_percent" for u in result.usage)
 
@@ -227,6 +230,30 @@ class TestCodexAppServer:
         forked = codex.run_turn(req(tmp_path, session_id=first.session_id, fork=True))
         assert again.lineage == "resumed_same" and again.session_id == first.session_id
         assert forked.lineage == "forked" and forked.session_id != first.session_id
+
+    def test_token_usage_schema_has_no_per_turn_field(self):
+        # Pins the labelling above to the recorded schema: if a per-turn field
+        # appears, `last` stays "call" and the new field becomes "turn".
+        schema = json.loads((FIXTURES / "codex" / "0.157.1" / "schema-subset.json").read_text())
+        usage = schema["definitions"]["ThreadTokenUsage"]["properties"]
+        assert set(usage) == {"last", "total", "modelContextWindow"}
+
+    def test_notifications_before_the_turn_start_response_are_kept(self, tmp_path, monkeypatch):
+        # Review finding: the collector was installed only after the
+        # turn/start response, so a fast failure emitted before it was dropped
+        # and the turn ended in a timeout instead of the real error.
+        monkeypatch.setenv("FAKE_CODEX_MODE", "early_fail")
+        adapter = CodexAppServerAdapter(shim(tmp_path, "codex", "fake_codex_appserver.py"))
+        try:
+            started = time.monotonic()
+            result = adapter.run_turn(req(tmp_path, timeout_seconds=5))
+            assert result.status == "failed", result.status
+            assert isinstance(result.error, QuotaError) and "usage limit" in str(result.error)
+            assert result.provider_invocation_id == "turn-1"
+            assert time.monotonic() - started < 4  # not the timeout path
+            assert adapter._rpc is not None and adapter._rpc.alive()  # no interrupt, server kept
+        finally:
+            adapter.close()
 
     def test_failed_turn_is_classified(self, tmp_path, monkeypatch):
         monkeypatch.setenv("FAKE_CODEX_MODE", "fail")
@@ -367,3 +394,100 @@ def test_stream_process_truncates_long_lines(tmp_path):
     code = "import sys; sys.stdout.write('a' * 5000 + '\\n' + 'short\\n')"
     result = stream_process([sys.executable, "-c", code], on_line=lines.append, cwd=tmp_path, timeout=30, max_line_bytes=100)
     assert result.truncated_lines == 1 and lines == ["a" * 100, "short"]
+
+
+# --- provider credentials never reach managed peers (R13) ------------------------------------
+
+CREDENTIAL_VARS = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+    "OPENAI_API_KEY", "CODEX_API_KEY", "AZURE_OPENAI_API_KEY",
+)
+
+
+class TestProviderCredentialEnv:
+    """Review finding: the adapters built the child env from os.environ, so an
+    exported ANTHROPIC_API_KEY/OPENAI_API_KEY silently switched a managed peer
+    to API billing (no silent paid fallback, R13)."""
+
+    @pytest.fixture()
+    def creds(self, monkeypatch):
+        for name in CREDENTIAL_VARS:
+            monkeypatch.setenv(name, f"secret-value-of-{name.lower()}")
+        monkeypatch.setenv("DUET_TEST_KEEP", "1")
+
+    @staticmethod
+    def child_env_names(result) -> set[str]:
+        assert result.ok, (result.status, result.error)
+        return set(json.loads(result.text.split("env: ", 1)[1]))
+
+    @staticmethod
+    def assert_reported(result) -> None:
+        warning = [w for w in result.warnings if "credential" in w]
+        assert len(warning) == 1
+        assert all(name in warning[0] for name in CREDENTIAL_VARS)
+        assert not any("secret-value-of" in w for w in result.warnings)  # names only, never values
+
+    def test_claude_child_gets_no_credentials(self, tmp_path, monkeypatch, creds):
+        monkeypatch.setenv("FAKE_CLAUDE_MODE", "env")
+        adapter = ClaudeCLIAdapter(shim(tmp_path, "claude", "fake_claude.py"))  # no env overrides at all
+        result = adapter.run_turn(req(tmp_path))
+        names = self.child_env_names(result)
+        assert not names & set(CREDENTIAL_VARS) and "DUET_TEST_KEEP" in names
+        self.assert_reported(result)
+
+    def test_claude_explicit_env_cannot_smuggle_a_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FAKE_CLAUDE_MODE", "env")
+        adapter = ClaudeCLIAdapter(shim(tmp_path, "claude", "fake_claude.py"), env={"DUET_MANAGED_PEER": "1"})
+        result = adapter.run_turn(req(tmp_path, env={"ANTHROPIC_API_KEY": "sk-from-request"}))
+        names = self.child_env_names(result)
+        assert "ANTHROPIC_API_KEY" not in names and "DUET_MANAGED_PEER" in names
+        assert any("ANTHROPIC_API_KEY" in w for w in result.warnings)
+        assert not any("sk-from-request" in w for w in result.warnings)
+
+    def test_claude_explicit_opt_in_keeps_api_billing(self, tmp_path, monkeypatch, creds):
+        monkeypatch.setenv("FAKE_CLAUDE_MODE", "env")
+        adapter = ClaudeCLIAdapter(shim(tmp_path, "claude", "fake_claude.py"), allow_api_key_env=True)
+        result = adapter.run_turn(req(tmp_path))
+        assert set(CREDENTIAL_VARS) <= self.child_env_names(result)
+        assert not any("credential" in w for w in result.warnings)
+
+    def test_no_warning_when_nothing_was_removed(self, tmp_path, monkeypatch):
+        for name in CREDENTIAL_VARS:
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("FAKE_CLAUDE_MODE", "env")
+        result = ClaudeCLIAdapter(shim(tmp_path, "claude", "fake_claude.py")).run_turn(req(tmp_path))
+        assert result.ok and not any("credential" in w for w in result.warnings)
+
+    def test_codex_app_server_starts_without_credentials(self, tmp_path, monkeypatch, creds):
+        monkeypatch.setenv("FAKE_CODEX_MODE", "env")
+        adapter = CodexAppServerAdapter(shim(tmp_path, "codex", "fake_codex_appserver.py"), env={"DUET_MANAGED_PEER": "1"})
+        try:
+            result = adapter.run_turn(req(tmp_path))
+            names = self.child_env_names(result)
+            assert not names & set(CREDENTIAL_VARS) and {"DUET_TEST_KEEP", "DUET_MANAGED_PEER"} <= names
+            self.assert_reported(result)
+            self.assert_reported(adapter.run_turn(req(tmp_path)))  # every turn on that server says so
+        finally:
+            adapter.close()
+
+    def test_codex_app_server_explicit_opt_in(self, tmp_path, monkeypatch, creds):
+        monkeypatch.setenv("FAKE_CODEX_MODE", "env")
+        adapter = CodexAppServerAdapter(shim(tmp_path, "codex", "fake_codex_appserver.py"), allow_api_key_env=True)
+        try:
+            result = adapter.run_turn(req(tmp_path))
+            assert set(CREDENTIAL_VARS) <= self.child_env_names(result)
+            assert not any("credential" in w for w in result.warnings)
+        finally:
+            adapter.close()
+
+    def test_codex_exec_child_gets_no_credentials(self, tmp_path, monkeypatch, creds):
+        monkeypatch.setenv("FAKE_CODEX_EXEC_MODE", "env")
+        result = CodexExecAdapter(shim(tmp_path, "codex", "fake_codex_exec.py")).run_turn(req(tmp_path))
+        names = self.child_env_names(result)
+        assert not names & set(CREDENTIAL_VARS) and "DUET_TEST_KEEP" in names
+        self.assert_reported(result)
+
+    def test_codex_exec_explicit_opt_in(self, tmp_path, monkeypatch, creds):
+        monkeypatch.setenv("FAKE_CODEX_EXEC_MODE", "env")
+        result = CodexExecAdapter(shim(tmp_path, "codex", "fake_codex_exec.py"), allow_api_key_env=True).run_turn(req(tmp_path))
+        assert set(CREDENTIAL_VARS) <= self.child_env_names(result)

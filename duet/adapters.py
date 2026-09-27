@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -13,6 +14,16 @@ from .providers.process import DEFAULT_MAX_STDERR, DEFAULT_MAX_STDOUT, run_bound
 
 SESSION_ID_PLACEHOLDER = "{session_id}"
 WORKSPACE_PLACEHOLDER = "{workspace}"
+
+# Claude Code >= 2.1.277 reports a resumed session's whole spend as the call's
+# `total_cost_usd`; older versions report the call's own cost. Shared with
+# duet.providers.claude_cli so both paths read the version the same way.
+CUMULATIVE_RESUME_COST_SINCE = (2, 1, 277)
+# cost_json_scope values. "auto" resolves per binary from `<cmd> --version`.
+COST_SCOPES = ("call", "session_cumulative_on_resume", "auto")
+# What "auto" resolves to when the version cannot be read: a resumed turn's
+# reported cost may be cumulative or not, so it is unknown.
+UNKNOWN_RESUME_SCOPE = "unknown_on_resume"
 # Quota/rate-limit suspicion markers. Matching is a last-resort heuristic over
 # a *failed* CLI's output, never a reading of the account balance. "billing"
 # and a bare "429" were removed: billing blocks are not retryable quota (see
@@ -146,6 +157,9 @@ class CLIAgent:
     # "session_cumulative_on_resume": a resumed session reports the whole
     # session's spend so far (Claude Code >= 2.1.277); the turn's own cost is
     # the delta against the last value seen for that session, or unknown.
+    # "auto": decided once per process from `<command> --version`: >= 2.1.277
+    # is session_cumulative_on_resume, older is call, and when the version
+    # cannot be read a resumed turn's cost is unknown.
     cost_json_scope: str = "call"
     _session_cost_seen: dict = field(default_factory=dict, repr=False)
 
@@ -239,8 +253,18 @@ class CLIAgent:
                 f"{self.name}: produced empty output. Command: {_redacted_cmd(cmd)}. stderr: {_tail(stderr)}",
                 kind="empty_output",
             )
-        if cost_usd is not None and self.cost_json_scope == "session_cumulative_on_resume":
-            cost_usd, problem = self._own_cost(cost_usd, resumed_from, session_id)
+        if cost_usd is not None and self.cost_json_scope != "call":
+            scope = detect_cost_scope(cmd[0]) if self.cost_json_scope == "auto" else self.cost_json_scope
+            problem = ""
+            if scope == "session_cumulative_on_resume":
+                cost_usd, problem = self._own_cost(cost_usd, resumed_from, session_id)
+            elif scope == UNKNOWN_RESUME_SCOPE and resumed_from is not None:
+                # A new session's first figure is the call's own cost under
+                # either reading; a resumed one may be cumulative or not.
+                cost_usd, problem = None, (
+                    f"could not read the {cmd[0]} version, so it is unknown whether the reported cost of a resumed "
+                    "session is cumulative; this turn's own cost is unknown"
+                )
             if problem:
                 warnings.append(problem)
         if proc.stdout_truncated:
@@ -315,6 +339,31 @@ class CLIAgent:
                     warnings.append(problem)
             return text, str(session_id) if session_id is not None else None, cost, warnings
         raise AgentError(f"{self.name}: unsupported output_format={self.output_format!r}")
+
+
+def parse_version(text: str) -> tuple[int, ...] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def cumulative_resume_cost(version: tuple[int, ...] | None) -> bool:
+    return bool(version and version >= CUMULATIVE_RESUME_COST_SINCE)
+
+
+@functools.lru_cache(maxsize=None)
+def detect_cost_scope(binary: str) -> str:
+    """Resolve cost_json_scope="auto" for a Claude Code binary: runs
+    `<binary> --version` once per process (per binary) and returns
+    "session_cumulative_on_resume" (>= 2.1.277), "call" (older) or
+    UNKNOWN_RESUME_SCOPE when no version could be read."""
+    try:
+        proc = run_bounded([binary, "--version"], timeout=30, max_stdout=64 * 1024, max_stderr=64 * 1024)
+    except OSError:
+        return UNKNOWN_RESUME_SCOPE
+    version = parse_version(proc.stdout) if proc.returncode == 0 and not proc.timed_out else None
+    if version is None:
+        return UNKNOWN_RESUME_SCOPE
+    return "session_cumulative_on_resume" if cumulative_resume_cost(version) else "call"
 
 
 def parse_cost(value: object) -> tuple[float | None, str]:

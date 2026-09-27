@@ -2,6 +2,7 @@
 approvals, tasks, fenced leases, atomic outbox, IN_DOUBT recovery."""
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -646,6 +647,112 @@ class TestProcessIdentity:
 
     def test_other_host_is_not_judged(self):
         assert replace(ProcessIdentity.current(), host="elsewhere.example").is_alive()
+
+    def test_non_spawning_mode_matches_full_check_with_procfs(self):
+        me = ProcessIdentity.current()
+        assert me.is_alive(allow_subprocess=False)
+        assert not replace(me, start="not-my-start-time").is_alive(allow_subprocess=False)
+        assert not replace(me, pid=999_999_999).is_alive(allow_subprocess=False)
+
+
+FAKE_BOOT = "{ sec = 1790000000, usec = 0 } Mon Sep 21 10:00:00 2026"
+FAKE_START = "Mon Sep 27 09:00:00 2026"
+
+
+class TestLivenessWithoutProcfs:
+    """Review finding: on platforms without /proc (macOS) the liveness check
+    spawns `sysctl`/`ps`, and it ran inside write transactions (lease
+    acquisition, reconcile), which the store forbids. Simulated here by hiding
+    /proc from the identity module and recording every subprocess together with
+    whether the store connection was inside a transaction at the time."""
+
+    @pytest.fixture()
+    def no_proc(self, rt, monkeypatch):
+        import socket
+        import types
+
+        import duet.runtime.identity as identity
+
+        class NoProcPath(type(Path())):
+            def exists(self, *args, **kwargs):
+                return False if str(self).startswith("/proc") else super().exists(*args, **kwargs)
+
+            def read_text(self, *args, **kwargs):
+                if str(self).startswith("/proc"):
+                    raise FileNotFoundError(str(self))
+                return super().read_text(*args, **kwargs)
+
+        calls: list[tuple[str, bool]] = []
+
+        def fake_run(argv, *args, **kwargs):
+            calls.append((argv[0], rt.store.connection().in_transaction))
+            if argv[0] == "sysctl":
+                return subprocess.CompletedProcess(argv, 0, stdout=FAKE_BOOT + "\n", stderr="")
+            if argv[0] == "ps":
+                pid = int(argv[-1])
+                return subprocess.CompletedProcess(argv, 0, stdout=(FAKE_START + "\n") if pid == os.getpid() else "", stderr="")
+            raise AssertionError(f"unexpected subprocess {argv}")
+
+        monkeypatch.setattr(identity, "Path", NoProcPath)
+        monkeypatch.setattr(identity, "sys", types.SimpleNamespace(platform="darwin"))
+        monkeypatch.setattr(identity, "subprocess", types.SimpleNamespace(run=fake_run, SubprocessError=subprocess.SubprocessError))
+        clear = getattr(identity.boot_id, "cache_clear", None)
+        if clear:
+            clear()
+        yield types.SimpleNamespace(calls=calls, host=socket.gethostname())
+        if clear:
+            clear()  # never leak the fake boot id into other tests
+
+    @staticmethod
+    def owner(env, pid: int) -> str:
+        return str(ProcessIdentity(env.host, FAKE_BOOT, pid, FAKE_START))
+
+    def test_reconcile_spawns_nothing_inside_the_transaction(self, rt, pair, no_proc):
+        rt.acquire_lease(CONTROLLER, "integration:dead", owner=self.owner(no_proc, 999_999_999), lease_seconds=3600)
+        rt.acquire_lease(CONTROLLER, "integration:live", owner=self.owner(no_proc, os.getpid()), lease_seconds=3600)
+        no_proc.calls.clear()
+        report = rt.reconcile(CONTROLLER)
+        assert report["released_leases"] == ["integration:dead"]
+        assert no_proc.calls, "the full liveness check should have run before the transaction"
+        assert not [c for c in no_proc.calls if c[1]], f"subprocess inside a transaction: {no_proc.calls}"
+
+    def test_lease_acquisition_spawns_nothing(self, rt, pair, no_proc):
+        rt.acquire_lease(CONTROLLER, "integration:live", owner=self.owner(no_proc, os.getpid()), lease_seconds=3600)
+        rt.acquire_lease(CONTROLLER, "integration:dead", owner=self.owner(no_proc, 999_999_999), lease_seconds=3600)
+        no_proc.calls.clear()
+        with pytest.raises(Conflict):  # the pid exists: conservatively alive
+            rt.acquire_lease(CONTROLLER, "integration:live", owner="w2", lease_seconds=60)
+        taken = rt.acquire_lease(CONTROLLER, "integration:dead", owner="w2", lease_seconds=60)  # no such pid: dead
+        assert taken["owner"] == "w2" and taken["fencing_token"] == 2
+        assert no_proc.calls == []
+
+    def test_reconcile_leaves_a_lease_reacquired_after_the_check(self, rt, pair, no_proc, monkeypatch):
+        rt.acquire_lease(CONTROLLER, "integration:x", owner=self.owner(no_proc, 999_999_999), lease_seconds=3600)
+        judged = rt._leases_with_dead_owners
+
+        def judge_then_race():
+            verdict = judged()
+            rt.acquire_lease(CONTROLLER, "integration:x", owner="w-new", lease_seconds=3600)  # re-acquired meanwhile
+            return verdict
+
+        monkeypatch.setattr(rt, "_leases_with_dead_owners", judge_then_race)
+        report = rt.reconcile(CONTROLLER)
+        assert report == {"released_leases": [], "in_doubt": []}
+        assert rt.store.read().require("leases", "integration:x")["owner"] == "w-new"
+
+    def test_boot_id_is_computed_once_per_process(self, no_proc):
+        import duet.runtime.identity as identity
+
+        ident = ProcessIdentity(no_proc.host, FAKE_BOOT, os.getpid(), FAKE_START)
+        assert ident.is_alive() and ident.is_alive()
+        assert not replace(ident, start="other").is_alive()
+        assert identity.boot_id() == FAKE_BOOT
+        assert [c[0] for c in no_proc.calls].count("sysctl") == 1
+        no_proc.calls.clear()
+        assert ident.is_alive(allow_subprocess=False)
+        assert not replace(ident, pid=999_999_999).is_alive(allow_subprocess=False)
+        assert not replace(ident, boot="another boot").is_alive(allow_subprocess=False)  # cached boot id differs
+        assert no_proc.calls == []
 
 
 def test_full_scenario_replays_exactly(rt, pair, clock):

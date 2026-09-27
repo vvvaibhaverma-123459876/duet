@@ -23,6 +23,45 @@ DEFAULT_MAX_STDERR = 1024 * 1024
 TERM_GRACE_SECONDS = 2.0
 DRAIN_GRACE_SECONDS = 2.0
 
+# Environment variables that make a provider CLI authenticate with an API key
+# or a cloud account, i.e. bill metered API usage, instead of the user's own
+# CLI login. A managed peer must never switch to paid usage on its own (R13),
+# so provider adapters remove them from the child environment by default.
+PROVIDER_CREDENTIAL_ENV = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+)
+
+
+def provider_child_env(
+    *overlays: dict[str, str] | None, allow_api_key_env: bool = False
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """The environment for a provider CLI child: Duet's own environment plus
+    `overlays`, minus provider credential variables unless the user explicitly
+    opted into API billing. Returns (env, removed variable names). Only names
+    are reported; values never leave this function."""
+    env = dict(os.environ)
+    for overlay in overlays:
+        env.update(overlay or {})
+    if allow_api_key_env:
+        return env, ()
+    removed = tuple(name for name in PROVIDER_CREDENTIAL_ENV if name in env)
+    for name in removed:
+        del env[name]
+    return env, removed
+
+
+def credential_env_warning(removed: tuple[str, ...]) -> str:
+    return (
+        f"removed provider credential variable(s) {', '.join(removed)} from the child environment so the CLI "
+        "uses its own login, not API billing (allow_api_key_env=True opts into API billing)"
+    )
+
 
 class BoundedBuffer:
     """Keeps the first and last `limit // 2` bytes of a stream and counts the
@@ -110,7 +149,9 @@ def run_bounded(
     started. On timeout the process tree is terminated and `timed_out` is set.
     Any BaseException while waiting (KeyboardInterrupt, SystemExit) terminates
     the tree and propagates: an interrupted caller never leaves the child
-    running."""
+    running. After a normal exit of the leader, whatever is left in its
+    process group is killed as well, so no background descendant outlives
+    the call."""
     started = time.monotonic()
     proc = subprocess.Popen(
         cmd,
@@ -155,10 +196,12 @@ def run_bounded(
         raise
 
     _join(readers, drain_grace)
+    # The leader exited. Anything still in the child's process group is ours
+    # and must not outlive the call: a descendant holding our pipes, and also
+    # one that redirected its stdio away (`cmd >/dev/null 2>&1 &`), which no
+    # pipe would ever reveal.
+    _kill_group(proc.pid, signal.SIGKILL)
     if any(reader.is_alive() for reader in readers):
-        # The leader exited but something it spawned still holds our pipes.
-        # Everything left in the child's process group is ours: kill it.
-        _kill_group(proc.pid, signal.SIGKILL)
         _join(readers, 1.0)
     incomplete = any(reader.is_alive() for reader in readers)
     if writer is not None:
@@ -276,6 +319,7 @@ def stream_process(
     max_stderr: int = DEFAULT_MAX_STDERR,
     interrupt_first: bool = False,
     term_grace: float = TERM_GRACE_SECONDS,
+    drain_grace: float = DRAIN_GRACE_SECONDS,
 ) -> StreamResult:
     """Run `cmd` and hand each stdout line to `on_line` as it arrives, in the
     caller's thread. Lines longer than `max_line_bytes` are truncated (and
@@ -284,8 +328,14 @@ def stream_process(
 
     On timeout or cancellation the child's process group gets SIGINT first
     when `interrupt_first` (CLIs such as Claude Code end the current turn
-    cleanly on SIGINT and still emit a final result), then SIGTERM/SIGKILL.
-    Lines that arrive during that grace period are still dispatched."""
+    cleanly on SIGINT and still emit a final result), then SIGTERM/SIGKILL
+    after `term_grace`, whether or not the leader is still alive: a
+    descendant that ignores SIGINT can hold stdout after the leader exited.
+    Lines that arrive during that grace period are still dispatched.
+
+    When the leader exits, descendants get `drain_grace` to finish writing;
+    then the rest of the process group is killed so a lingering descendant
+    that holds stdout cannot keep the call (and its timeout) waiting."""
     import queue
 
     started = time.monotonic()
@@ -350,11 +400,12 @@ def stream_process(
     deadline = None if timeout is None else started + max(timeout, 0.0)
     timed_out = cancelled = over_limit = False
     stop_requested_at: float | None = None
+    leader_exited_at: float | None = None
+    group_killed_at: float | None = None
     dispatched_bytes = 0
     count = 0
-    eof = False
     try:
-        while not eof:
+        while True:
             now = time.monotonic()
             if stop_requested_at is None:
                 if deadline is not None and now >= deadline:
@@ -367,16 +418,30 @@ def stream_process(
                         _kill_group(proc.pid, signal.SIGINT)
                     else:
                         terminate_tree(proc, grace=term_grace)
-            elif interrupt_first and now - stop_requested_at > term_grace and proc.poll() is None:
+                        group_killed_at = time.monotonic()
+            elif group_killed_at is None and now - stop_requested_at > term_grace:
+                # Escalate regardless of the leader: if it already exited, a
+                # descendant that ignored SIGINT may still hold stdout.
                 terminate_tree(proc, grace=term_grace)
+                group_killed_at = time.monotonic()
+            if leader_exited_at is None and proc.poll() is not None:
+                leader_exited_at = now
+            if group_killed_at is None and leader_exited_at is not None and now - leader_exited_at > drain_grace and reader.is_alive():
+                # The leader is gone but something it spawned still holds
+                # stdout. Everything left in the child's process group is ours.
+                _kill_group(proc.pid, signal.SIGKILL)
+                group_killed_at = now
             try:
                 item = lines.get(timeout=0.1)
             except queue.Empty:
                 if proc.poll() is not None and not reader.is_alive():
                     break
+                if group_killed_at is not None and time.monotonic() - group_killed_at > drain_grace:
+                    # Killed the whole group and stdout is still open: a
+                    # process that left the group holds it. Stop waiting.
+                    break
                 continue
             if item is None:
-                eof = True
                 break
             raw, _ = item
             dispatched_bytes += len(raw) + 1
@@ -388,9 +453,18 @@ def stream_process(
     except BaseException:
         terminate_tree(proc, grace=term_grace)
         raise
+    if stop_requested_at is not None:
+        wait_for = term_grace * 2
+    elif deadline is None:
+        wait_for = 30.0
+    else:
+        # stdout closed but the leader may still run: keep honouring the deadline.
+        wait_for = min(30.0, max(1.0, deadline - time.monotonic()))
     try:
-        proc.wait(timeout=term_grace * 2 if stop_requested_at is not None else 30)
+        proc.wait(timeout=wait_for)
     except subprocess.TimeoutExpired:
+        if stop_requested_at is None and deadline is not None and time.monotonic() >= deadline:
+            timed_out = True
         terminate_tree(proc, grace=term_grace)
     if proc.poll() is None:  # pragma: no cover - defensive
         terminate_tree(proc, grace=term_grace)

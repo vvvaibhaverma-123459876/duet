@@ -99,6 +99,22 @@ class TestStrictWorkspace:
         # The worktree lives in Duet's state dir, not in the user's repository.
         assert repo not in ws.path.parents
 
+    def test_user_git_exclude_and_ignored_status_are_untouched(self, env):
+        # Review finding: create() appended `.duet/` to info/exclude, which for
+        # a linked worktree resolves to the user's *shared* git dir.
+        rt, manager, repo, run = env
+        (repo / ".duet").mkdir()
+        (repo / ".duet" / "legacy.json").write_text("{}\n")  # user-visible before and after
+        exclude = repo / ".git" / "info" / "exclude"
+        exclude_before = exclude.read_bytes() if exclude.exists() else None
+        status_before = git("status", "--ignored", "--porcelain", cwd=repo)
+        ws = manager.create(run["run_id"], repo)
+        assert (exclude.read_bytes() if exclude.exists() else None) == exclude_before
+        assert git("status", "--ignored", "--porcelain", cwd=repo) == status_before
+        common = Path(git("rev-parse", "--git-common-dir", cwd=ws.path).strip())
+        common = common if common.is_absolute() else (ws.path / common).resolve()
+        assert common == (repo / ".git").resolve()  # the file really is shared
+
     def test_existing_branch_is_never_reused(self, env):
         rt, manager, repo, run = env
         git("branch", "taken", cwd=repo)
@@ -137,6 +153,44 @@ class TestStrictWorkspace:
         assert not (ws.path / ".env").exists()
         # With explicit user approval the secret may be imported.
         assert manager.import_inputs(ws, repo, [".env"], allow_sensitive=True).imported == (".env",)
+
+    def test_import_refuses_symlinked_parent_in_source(self, env, tmp_path):
+        # Review finding: only the last component was lstat-checked, so a
+        # symlinked parent directory imported files from outside the repo.
+        rt, manager, repo, run = env
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("outside the repository\n")
+        (repo / "vendor").symlink_to(outside)
+        ws = manager.create(run["run_id"], repo)
+        report = manager.import_inputs(ws, repo, ["vendor/secret.txt"])
+        assert report.imported == ()
+        assert "symlink" in dict(report.refused)["vendor/secret.txt"]
+        assert not (ws.path / "vendor").exists()
+
+    def test_import_refuses_symlinked_parent_in_workspace(self, env, tmp_path):
+        rt, manager, repo, run = env
+        (repo / "docs").mkdir()
+        (repo / "docs" / "readme.md").write_text("user docs\n")
+        ws = manager.create(run["run_id"], repo)
+        outside_dst = tmp_path / "outside_dst"
+        outside_dst.mkdir()
+        (ws.path / "docs").symlink_to(outside_dst)  # e.g. planted by an agent
+        report = manager.import_inputs(ws, repo, ["docs/readme.md"])
+        assert report.imported == ()
+        assert "symlink" in dict(report.refused)["docs/readme.md"]
+        assert list(outside_dst.iterdir()) == []  # nothing written outside the workspace
+
+    def test_import_replaces_a_workspace_symlink_instead_of_writing_through_it(self, env, tmp_path):
+        rt, manager, repo, run = env
+        ws = manager.create(run["run_id"], repo)
+        target = tmp_path / "outside_file"
+        target.write_text("untouched\n")
+        (ws.path / "notes.txt").symlink_to(target)
+        assert manager.import_inputs(ws, repo, ["notes.txt"]).imported == ("notes.txt",)
+        assert target.read_text() == "untouched\n"
+        assert not (ws.path / "notes.txt").is_symlink()
+        assert (ws.path / "notes.txt").read_text() == "my untracked notes\n"
 
 
 class TestSnapshots:

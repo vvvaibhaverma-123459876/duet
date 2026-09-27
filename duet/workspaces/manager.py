@@ -26,7 +26,7 @@ from pathlib import Path, PurePosixPath
 from ..runtime.api import Runtime
 from ..runtime.contracts import CONTROLLER, Principal, StaleLease, ValidationError
 from ..runtime.paths import ensure_private_dir, runtime_dir
-from ..workspace import _exclude_duet_dir, _unique_branch, assert_safe_live_repo
+from ..workspace import _unique_branch, assert_safe_live_repo
 from .repo import RepoIdentity, resolve_repo
 from .snapshots import is_sensitive, is_transient
 
@@ -72,7 +72,10 @@ class WorkspaceManager:
         # `git worktree add` from the common repo never touches the user's
         # current checkout: no branch switch, no index update, no stash.
         _git(["worktree", "add", "--quiet", "-b", name, str(dest), base_sha], repo.toplevel)
-        _exclude_duet_dir(dest)
+        # No `.duet/` entry is written to info/exclude: for a linked worktree
+        # that file lives in the *common* git dir, i.e. it is the user's
+        # repository configuration (and changes their `git status --ignored`).
+        # Strict mode keeps its state outside the worktree, so none is needed.
         return StrictWorkspace(run_id=run_id, repo=repo, path=dest.resolve(), branch=name, base_sha=base_sha)
 
     # -- one writer ---------------------------------------------------------------
@@ -104,8 +107,10 @@ class WorkspaceManager:
         """Copy an explicit, user-approved list of files from the user's
         checkout into the workspace. Each path is checked: it must stay inside
         both trees, must not be under .git, must not be a symlink that escapes,
-        and must not look like a secret unless `allow_sensitive` was approved."""
+        must not pass through a symlinked directory on either side, and must
+        not look like a secret unless `allow_sensitive` was approved."""
         src_root = Path(source).resolve()
+        dest_root = workspace.path.resolve()
         imported: list[str] = []
         refused: list[tuple[str, str]] = []
         for raw in paths:
@@ -123,6 +128,17 @@ class WorkspaceManager:
                 refused.append((raw, "looks like a secret; needs explicit user approval"))
                 continue
             src = src_root.joinpath(*rel.parts)
+            dest = dest_root.joinpath(*rel.parts)
+            # Only the last component is lstat-checked below, so every parent
+            # directory must be a real directory on both sides: a symlinked
+            # parent (`vendor -> /elsewhere`) would read from, or write to,
+            # outside the tree.
+            problem = _parent_problem(src_root, rel.parts, "source checkout", must_exist=True)
+            if problem is None:
+                problem = _parent_problem(dest_root, rel.parts, "workspace", must_exist=False)
+            if problem is not None:
+                refused.append((raw, problem))
+                continue
             try:
                 info = os.lstat(src)
             except FileNotFoundError:
@@ -141,11 +157,17 @@ class WorkspaceManager:
             elif info.st_size > MAX_IMPORT_BYTES:
                 refused.append((raw, f"larger than {MAX_IMPORT_BYTES} bytes"))
                 continue
-            dest = workspace.path.joinpath(*rel.parts)
             dest.parent.mkdir(parents=True, exist_ok=True)
+            if not _inside(src.parent.resolve(), src_root) or not _inside(dest.parent.resolve(), dest_root):
+                refused.append((raw, "a parent directory resolves outside the source checkout or the workspace"))
+                continue
+            if dest.is_dir() and not dest.is_symlink():
+                refused.append((raw, "a directory of that name exists in the workspace"))
+                continue
+            if dest.is_symlink() or dest.exists():
+                # Replace whatever is there; never write through a link.
+                dest.unlink()
             if stat.S_ISLNK(info.st_mode):
-                if dest.exists() or dest.is_symlink():
-                    dest.unlink()
                 os.symlink(os.readlink(src), dest)
             else:
                 shutil.copy2(src, dest, follow_symlinks=False)
@@ -158,6 +180,34 @@ class WorkspaceManager:
         _git(["worktree", "remove", "--force", str(workspace.path)], workspace.repo.toplevel)
         if delete_branch:
             _git(["branch", "-D", workspace.branch], workspace.repo.toplevel)
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _parent_problem(root: Path, parts: tuple[str, ...], where: str, *, must_exist: bool) -> str | None:
+    """Walk the parent components of `parts` under `root` with lstat. Each
+    existing one must be a real directory, never a symlink. A missing one is
+    acceptable only where it will be created (the workspace side)."""
+    current = root
+    for part in parts[:-1]:
+        current = current / part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            return f"does not exist in the {where}" if must_exist else None
+        except NotADirectoryError:
+            return f"a parent path is not a directory in the {where}"
+        if stat.S_ISLNK(info.st_mode):
+            return f"a parent directory is a symlink in the {where}"
+        if not stat.S_ISDIR(info.st_mode):
+            return f"a parent path is not a directory in the {where}"
+    return None
 
 
 def _git(args: list[str], cwd: Path) -> str:

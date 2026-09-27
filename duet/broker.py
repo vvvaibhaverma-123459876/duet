@@ -137,8 +137,12 @@ def run_session(
     policy = StopPolicy(max_turns, wallclock_seconds, loop_threshold, verifier, baseline_status=baseline.status)
     verification_note = format_verification(baseline) if baseline.status != "unknown" else ""
 
+    # Agents whose unknown turn cost the budget notes already mention. Unknown
+    # is never zero (D-003): the budget can only count what was reported.
+    unknown_cost_noted: set[str] = set()
     if budget_usd > 0:
         unreported = [name for name, agent in agents.items() if not getattr(agent, "cost_json_path", "")]
+        unknown_cost_noted.update(unreported)
         if unreported:
             run.note(
                 f"budget ${budget_usd:.2f} covers reported costs only; {', '.join(unreported)} "
@@ -158,8 +162,10 @@ def run_session(
             if time.monotonic() >= deadline:
                 return run.finish("halted", f"WallClockBudget({wallclock_seconds})", policy)
             if budget_usd > 0 and transcript.total_cost_usd >= budget_usd:
+                unknown = transcript.cost_unknown_turns
                 run.note(
-                    f"budget exhausted: ${transcript.total_cost_usd:.4f} spent of ${budget_usd:.2f} cap (reported costs only)"
+                    f"budget exhausted: ${transcript.total_cost_usd:.4f} spent of ${budget_usd:.2f} cap (reported costs only"
+                    + (f"; {unknown} turn(s) with unknown cost not counted)" if unknown else ")")
                 )
                 return run.finish("halted", f"BudgetExceeded(${budget_usd:.2f})", policy)
 
@@ -230,6 +236,13 @@ def run_session(
                 changed=changed,
             )
             transcript.add(message)
+            if budget_usd > 0 and message.cost_usd is None and agent_name not in unknown_cost_noted:
+                unknown_cost_noted.add(agent_name)
+                run.note(
+                    f"budget ${budget_usd:.2f} cannot account for turn {turn + 1}: {agent.display_name} reported no "
+                    f"usable cost for it, so that spend is unknown (not zero) and is not counted against the budget; "
+                    f"the same holds for any later turn of {agent.display_name} without a reported cost"
+                )
             turn += 1
             pointer += 1
             last_turn_of[agent_name] = turn

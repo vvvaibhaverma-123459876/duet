@@ -264,6 +264,29 @@ class TestBudget:
         assert result.outcome == "unverified"
         assert any("covers reported costs only" in note and "a reports no cost" in note for note in result.transcript.notes)
 
+    def test_unknown_cost_from_a_cost_reporting_agent_is_noted_not_zero(self, tmp_path):
+        # Review finding: an agent *with* a cost path whose output lacked a
+        # cost was silently counted as $0 against the budget (D-003).
+        ws = repo(tmp_path)
+        a = Scripted("a", ["one [[HANDOFF]]", "two [[HANDOFF]]", "done [[DONE]]"], cost=None)
+        a.cost_json_path = "total_cost_usd"  # configured to report, but reported nothing
+        result = session(ws, {"a": a}, budget_usd=0.5, max_turns=3, require_all_agents_for_success=False)
+        assert a.calls == 3  # turns are still admitted; only the note is new
+        assert result.outcome == "unverified"
+        notes = [n for n in result.transcript.notes if "cannot account for" in n]
+        assert len(notes) == 1 and "turn 1" in notes[0] and "unknown (not zero)" in notes[0]
+        assert not any("covers reported costs only" in n for n in result.transcript.notes)
+        assert result.transcript.cost_unknown_turns == 3 and result.transcript.total_cost_usd == 0.0
+        assert not result.transcript.cost_complete
+        assert all(m.cost_usd is None for m in result.transcript.messages)
+
+    def test_no_unknown_cost_note_without_a_budget(self, tmp_path):
+        ws = repo(tmp_path)
+        a = Scripted("a", ["done [[DONE]]"], cost=None)
+        a.cost_json_path = "total_cost_usd"
+        result = session(ws, {"a": a}, require_all_agents_for_success=False)
+        assert not any("cannot account for" in n for n in result.transcript.notes)
+
     @pytest.mark.parametrize("bad", [-1.0, math.nan, math.inf])
     def test_invalid_budget_rejected(self, tmp_path, bad):
         with pytest.raises(ValueError):
@@ -618,8 +641,103 @@ class TestResumedSessionCost:
         assert first.cost_usd is None and "cumulative spend" in first.text
         assert agent.send("x", tmp_path).cost_usd == pytest.approx(0.30)
 
-    def test_default_claude_config_uses_cumulative_scope(self):
+    def test_default_claude_config_uses_auto_scope(self):
+        # Review finding: the packaged default hard-coded the cumulative scope,
+        # so Claude < 2.1.277 (per-call cost) produced wrong deltas.
         from duet.config import default_config_text, parse_config
 
-        assert parse_config(default_config_text()).agents["claude"].cost_json_scope == "session_cumulative_on_resume"
+        assert parse_config(default_config_text()).agents["claude"].cost_json_scope == "auto"
         assert parse_config(default_config_text()).agents["codex"].cost_json_scope == "call"
+        assert (REPO_ROOT / "duet.toml").read_text() == default_config_text()
+
+    @pytest.mark.parametrize("scope", ["call", "session_cumulative_on_resume", "auto"])
+    def test_cost_scopes_accepted(self, scope):
+        config = f'[agents.x]\ncommand = ["x"]\ncost_json_scope = "{scope}"\n'
+        assert parse_config(config).agents["x"].cost_json_scope == scope
+
+    def test_unknown_cost_scope_rejected(self):
+        with pytest.raises(ConfigError, match="cost_json_scope"):
+            parse_config('[agents.x]\ncommand = ["x"]\ncost_json_scope = "sometimes"\n')
+
+
+class TestAutoCostScope:
+    """cost_json_scope = "auto": the reading of `total_cost_usd` follows the
+    installed Claude Code version, read once per process from `--version`."""
+
+    @pytest.fixture(autouse=True)
+    def fresh_detection(self):
+        from duet.adapters import detect_cost_scope
+
+        detect_cost_scope.cache_clear()
+        yield
+        detect_cost_scope.cache_clear()
+
+    def _agent(self, tmp_path, costs, version_cmd, name="claude"):
+        state = tmp_path / f"{name}.n"
+        script = tmp_path / f"{name}.sh"
+        costs_list = " ".join(str(c) for c in costs)
+        script.write_text(
+            "#!/bin/bash\n"
+            f'if [ "$1" = "--version" ]; then echo x >> {tmp_path / "version-calls"}; {version_cmd}; fi\n'
+            "cat > /dev/null\n"
+            f"n=$(cat {state} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {state}\n"
+            f"costs=({costs_list}); c=${{costs[$((n-1))]}}\n"
+            'echo "{\\"result\\":\\"ok\\",\\"session_id\\":\\"s1\\",\\"total_cost_usd\\":$c}"\n'
+        )
+        script.chmod(0o755)
+        return CLIAgent(
+            name, name.title(), [str(script)], "stdin", "", "json", 30, result_json_path="result",
+            session_json_path="session_id", cost_json_path="total_cost_usd", resume_command=[str(script), "{session_id}"],
+            chain_sessions=True, cost_json_scope="auto",
+        )
+
+    def version_calls(self, tmp_path) -> int:
+        path = tmp_path / "version-calls"
+        return len(path.read_text().splitlines()) if path.exists() else 0
+
+    def test_new_claude_reports_session_cumulative_cost(self, tmp_path):
+        agent = self._agent(tmp_path, [0.25, 0.60, 1.00], 'echo "2.1.283 (Claude Code)"; exit 0')
+        costs = [agent.send("x", tmp_path).cost_usd for _ in range(3)]
+        assert costs == [pytest.approx(0.25), pytest.approx(0.35), pytest.approx(0.40)]
+        assert self.version_calls(tmp_path) == 1  # once per process, not per turn
+
+    def test_old_claude_reports_per_call_cost(self, tmp_path):
+        # Before 2.1.277 each call reports its own cost; deltas would be wrong.
+        agent = self._agent(tmp_path, [0.25, 0.30, 0.20], 'echo "2.1.276 (Claude Code)"; exit 0')
+        results = [agent.send("x", tmp_path) for _ in range(3)]
+        assert [r.cost_usd for r in results] == [pytest.approx(0.25), pytest.approx(0.30), pytest.approx(0.20)]
+        assert not any("Duet warning" in r.text for r in results)
+
+    def test_unknown_version_makes_resumed_cost_unknown(self, tmp_path):
+        agent = self._agent(tmp_path, [0.25, 0.60, 1.00], "echo 'no version here'; exit 0")
+        first, second, third = (agent.send("x", tmp_path) for _ in range(3))
+        assert first.cost_usd == pytest.approx(0.25)  # a new session: the call's own cost either way
+        assert second.cost_usd is None and third.cost_usd is None
+        assert "could not read" in second.text and "unknown" in second.text
+
+    def test_failing_version_command_is_unknown_not_zero(self, tmp_path):
+        agent = self._agent(tmp_path, [0.25, 0.60], "exit 1")
+        agent.session_id = "s1"  # attached session: every turn is a resume
+        assert agent.send("x", tmp_path).cost_usd is None
+
+    def test_detection_is_shared_across_agents_in_a_process(self, tmp_path):
+        from duet.adapters import detect_cost_scope
+
+        agent = self._agent(tmp_path, [0.25, 0.60], 'echo "2.1.283 (Claude Code)"; exit 0')
+        agent.send("x", tmp_path)
+        assert detect_cost_scope(agent.command[0]) == "session_cumulative_on_resume"
+        again = CLIAgent(
+            "claude", "Claude", list(agent.command), "stdin", "", "json", 30, result_json_path="result",
+            cost_json_path="total_cost_usd", cost_json_scope="auto",
+        )
+        again.send("x", tmp_path)
+        assert self.version_calls(tmp_path) == 1
+
+    def test_version_logic_matches_the_provider_adapter(self):
+        from duet.adapters import CUMULATIVE_RESUME_COST_SINCE, cumulative_resume_cost, parse_version
+        from duet.providers import claude_cli
+
+        assert claude_cli.cumulative_resume_cost is cumulative_resume_cost
+        assert claude_cli.parse_version is parse_version
+        assert CUMULATIVE_RESUME_COST_SINCE == (2, 1, 277)
+        assert not cumulative_resume_cost(parse_version("2.1.276")) and cumulative_resume_cost(parse_version("2.1.277"))

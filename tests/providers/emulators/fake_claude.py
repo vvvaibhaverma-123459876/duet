@@ -3,7 +3,8 @@
 fixture; stream-json event shapes from the Claude Code docs for programmatic
 use and cost tracking). Mode via FAKE_CLAUDE_MODE:
   success | auth | rate_limit | billing | model | flood | malformed | hang |
-  crash_zero | budget | no_result | denied"""
+  crash_zero | budget | no_result | denied |
+  env (the result text lists the names of the environment variables it got)"""
 import json
 import os
 import signal
@@ -72,6 +73,11 @@ if MODE in ("auth", "rate_limit", "billing", "model"):
 
 if MODE == "no_result":
     sys.exit(1)
+
+if MODE == "env":
+    names = "env: " + json.dumps(sorted(os.environ))
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "duration_ms": 1, "result": names, "total_cost_usd": 0.01, "usage": {}})
+    sys.exit(0)
 
 if MODE == "peer":
     # Act through the DUET MCP server named in --mcp-config (see agent_brain.py).

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from .adapters import DEFAULT_QUOTA_MARKERS, SESSION_ID_PLACEHOLDER, CLIAgent
+from .adapters import COST_SCOPES, DEFAULT_QUOTA_MARKERS, SESSION_ID_PLACEHOLDER, CLIAgent
 from .providers.process import DEFAULT_MAX_STDERR, DEFAULT_MAX_STDOUT
 
 VALID_PROMPT_VIA = {"stdin", "stdin-sentinel", "arg"}
@@ -162,8 +162,8 @@ def _build_agent(name: str, item: dict, label: str) -> CLIAgent:
         if not any(SESSION_ID_PLACEHOLDER in part for part in resume_command):
             raise ConfigError(f"agent '{name}': resume_command must contain the {SESSION_ID_PLACEHOLDER!r} placeholder")
     cost_json_scope = _string(item, "cost_json_scope", "call", where)
-    if cost_json_scope not in ("call", "session_cumulative_on_resume"):
-        raise ConfigError(f"agent '{name}': cost_json_scope must be 'call' or 'session_cumulative_on_resume'")
+    if cost_json_scope not in COST_SCOPES:
+        raise ConfigError(f"agent '{name}': cost_json_scope must be one of {', '.join(repr(s) for s in COST_SCOPES)}")
     quota_markers = item.get("quota_markers", [])
     if not isinstance(quota_markers, list) or not all(isinstance(m, str) and m for m in quota_markers):
         raise ConfigError(f"agent '{name}': quota_markers must be a list of non-empty strings")

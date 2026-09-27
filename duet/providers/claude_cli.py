@@ -16,7 +16,14 @@ docs for programmatic use and cost tracking:
   earlier spend (Claude Code >= 2.1.277), so they are *session cumulative*,
   not this call's cost; `--max-budget-usd` caps only the call's own spend;
 - costs are client-side estimates, not bills;
-- SIGINT ends the current turn cleanly; SIGTERM leaves it unfinished."""
+- SIGINT ends the current turn cleanly; SIGTERM leaves it unfinished.
+
+In non-interactive mode Claude Code prefers ANTHROPIC_API_KEY (API billing)
+over the user's login when it is set. The child environment therefore never
+carries provider credential variables (process.PROVIDER_CREDENTIAL_ENV) unless
+the adapter is constructed with `allow_api_key_env=True`, an explicit opt-in
+for a user who deliberately wants API billing; nothing in DUET sets it. The
+removed names (never their values) are reported in the turn's warnings."""
 from __future__ import annotations
 
 import json
@@ -26,6 +33,7 @@ import threading
 import time
 
 from ..adapters import (
+    CUMULATIVE_RESUME_COST_SINCE,
     AgentError,
     AgentTimeoutError,
     AuthError,
@@ -34,6 +42,8 @@ from ..adapters import (
     OutputLimitError,
     QuotaError,
     classify_failure,
+    cumulative_resume_cost,
+    parse_version,
 )
 from ..runtime.contracts import Control, UsageCapability
 from .base import (
@@ -48,9 +58,8 @@ from .base import (
     int_or_none,
     lineage_for,
 )
-from .process import stream_process
+from .process import credential_env_warning, provider_child_env, stream_process
 
-CUMULATIVE_RESUME_COST_SINCE = (2, 1, 277)
 RETRY_CATEGORY_ERRORS = {
     "authentication_failed": AuthError,
     "oauth_org_not_allowed": AuthError,
@@ -60,11 +69,6 @@ RETRY_CATEGORY_ERRORS = {
     "model_not_found": ModelUnavailableError,
 }
 RETRY_CATEGORY_QUOTA = {"rate_limit": "rate_limit", "overloaded": "overloaded"}
-
-
-def parse_version(text: str) -> tuple[int, ...] | None:
-    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
-    return tuple(int(part) for part in match.groups()) if match else None
 
 
 def help_flags(help_text: str) -> frozenset[str]:
@@ -106,10 +110,6 @@ def discover_from_help(help_text: str, version_text: str) -> ProviderCapabilitie
     )
 
 
-def cumulative_resume_cost(version: tuple[int, ...] | None) -> bool:
-    return bool(version and version >= CUMULATIVE_RESUME_COST_SINCE)
-
-
 class ClaudeCLIAdapter:
     name = "claude"
 
@@ -123,8 +123,14 @@ class ClaudeCLIAdapter:
         version_text: str | None = None,
         max_line_bytes: int = 4 * 1024 * 1024,
         max_total_bytes: int = 64 * 1024 * 1024,
+        allow_api_key_env: bool = False,
     ) -> None:
+        """`allow_api_key_env=True` keeps provider API-key/cloud credential
+        variables in the child environment, i.e. lets Claude Code bill the API
+        instead of the user's login. Off by default (R13: no silent paid
+        fallback); only a user who explicitly wants API billing should set it."""
         self.binary = binary
+        self.allow_api_key_env = allow_api_key_env
         self.allowed_tools = tuple(allowed_tools)
         self.env = env
         self._help_text = help_text
@@ -225,13 +231,7 @@ class ClaudeCLIAdapter:
             if on_event and state.last_event is not None:
                 on_event(state.last_event)
 
-        env = None
-        if self.env or request.env:
-            import os
-
-            env = dict(os.environ)
-            env.update(self.env or {})
-            env.update(request.env or {})
+        env, removed_env = provider_child_env(self.env, request.env, allow_api_key_env=self.allow_api_key_env)
         started = time.monotonic()
         try:
             proc = stream_process(
@@ -251,6 +251,8 @@ class ClaudeCLIAdapter:
         observed = {k: v for k, v in (("model", state.init.get("model")), ("permission_mode", state.init.get("permissionMode")), ("session_id", state.session_id)) if v}
         settings = SettingsRecord(requested, accepted, observed)
         warnings = list(state.warnings)
+        if removed_env:
+            warnings.append(credential_env_warning(removed_env))
         if proc.truncated_lines:
             warnings.append(f"{proc.truncated_lines} over-long stream line(s) were truncated")
         usage = self._usage(state, request, self.cumulative_resume_cost)
@@ -370,4 +372,6 @@ class _StreamState:
 
 
 
-__all__ = ["ClaudeCLIAdapter", "discover_from_help", "help_flags", "parse_version"]
+# parse_version, cumulative_resume_cost and CUMULATIVE_RESUME_COST_SINCE live in
+# duet.adapters (shared with the legacy CLI agent's cost_json_scope = "auto").
+__all__ = ["CUMULATIVE_RESUME_COST_SINCE", "ClaudeCLIAdapter", "cumulative_resume_cost", "discover_from_help", "help_flags", "parse_version"]
