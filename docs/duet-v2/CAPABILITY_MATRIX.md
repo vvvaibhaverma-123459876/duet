@@ -26,10 +26,10 @@ compatibility.
 
 | ID | Requirement | Milestones | Status |
 |---|---|---|---|
-| R01 | Partnership with evidenced contributions | D05, D06, D10 | TESTED_SIM (pair runs need a registered Claude and Codex; completion requires authored snapshot + cross-provider review; peer loss holds completion); substantive-contribution scheduling: D06 |
+| R01 | Partnership with evidenced contributions | D05, D06, D10 | TESTED_SIM (both providers registered; contributions recorded only from evidence: authored changes, reviews, accepted task results and plans; messages never count; peer loss holds completion); joint-authorship reviews: D10 |
 | R02 | Original-session continuity | D05, D12 | TESTED_SIM (native session stays the participant: rejoin is idempotent, restart reconnects via host identity, a dead host becomes `gone` and its token stops working); LIVE: NOT_RUN |
 | R03 | Two-way initiative | D05 | TESTED_SIM (either side asks at any time; non-blocking send; waits wake on questions) — real models: NOT_RUN |
-| R04 | One objective/contract | D02, D06 | TESTED_SIM (runtime: one run, versioned acceptance contract, user-only changes); scheduler: D06 |
+| R04 | One objective/contract | D02, D06 | TESTED_SIM (one run, versioned acceptance contract, user-only changes; shared plans only add tasks and cannot touch the objective or contract) |
 | R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
 | R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
 | R07 | Completion reserve | D08 | NOT_STARTED |
@@ -65,7 +65,7 @@ compatibility.
 | AT17 | Unsupported effort / org clamp | D09 | adapter-level rejection tests (D04) | PARTIAL: rejection TESTED_SIM; clamp detection needs live observation: NOT_RUN |
 | AT18 | User pins model/effort | D09/D12 | | NOT_STARTED |
 | AT19 | Missing dependency failure | D09 | | NOT_STARTED |
-| AT20 | Repeated no-progress repairs | D06/D09 | | NOT_STARTED |
+| AT20 | Repeated no-progress repairs | D06/D09 | `test_repeated_failures_replan_then_pause`, `test_message_ping_pong_stalls_then_pauses`, scheduler simulation (bounded re-plan then pause) | TESTED_SIM (bounded re-plan, then honest pause); model escalation: D09 |
 | AT21 | Old green suite, feature absent | D01/D10 | legacy `test_suite_green_at_baseline_does_not_end_the_session`; v2 `test_green_existing_suite_without_the_feature_is_not_complete` | TESTED_SIM |
 | AT22 | DONE with missing verifier | D01 | `test_d01_semantics.py::TestCompletion::test_done_with_missing_verifier_is_unverified`, battery `test_scratch_run_without_verifier_is_unverified` | TESTED_SIM |
 | AT23 | Approval of old revision | D10 | `test_approval_of_an_old_snapshot_does_not_count` | TESTED_SIM (D03); delta-review rules: D10 |

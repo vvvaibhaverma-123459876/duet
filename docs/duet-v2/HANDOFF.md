@@ -4,15 +4,13 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D05** (see `D01_REPORT.md` to `D05_REPORT.md`).
+- Last completed milestone: **D06** (see `D01_REPORT.md` to `D06_REPORT.md`), pushed as `619ca53`.
 - `feat/isolate-modes` is merged in (`9db29f3`).
-- Suite after D05, as root: 537 passed, 6 skipped without the MCP SDK; 541
-  passed, 4 skipped with `mcp==2.2.0` (the skips are the gated real-provider
-  and real-pair tests). As non-root, the integration, runtime, verification
-  workspace and provider tests pass (243 passed, 2 skipped). Non-root packaging tests
-  skip because that user cannot read the proxy CA bundle.
+- Suite after D06, as root: 651 passed, 6 skipped without the MCP SDK; 656
+  passed, 4 skipped with `mcp==2.2.0`. Integration, verification and runtime
+  tests as non-root: 291 passed, 2 skipped.
 - The MCP tests need the extra: `pip install -e ".[test,mcp]"`. In this
-  environment a venv at the session scratchpad has it (`mcpvenv`).
+  environment a venv in the session scratchpad has it (`mcpvenv`).
 
 ## How to run the tests here
 
@@ -27,14 +25,16 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-1. A person with both CLIs logged in runs `PEER_ALPHA_TEST.md` (AT01–AT03).
-   Peer-alpha is not earned until then.
-2. D06: shared plan proposals, validated task dependencies, bounded
-   ownership, substantive contribution records, role reassignment, and
-   progress/loop detection from task and evidence changes (`runtime/
-   scheduler.py`, scheduler simulation suite). Build on the D05 coordinator:
-   today participant tasks are accepted automatically up to a cap and there
-   is one writer.
+1. Merge the core-module review fixes (process groups, no subprocess inside
+   write transactions, strict worktrees leaving `.git/info/exclude` alone,
+   symlinked import parents, the legacy budget note, the legacy cost scope,
+   provider API keys removed from managed peers' environment, Codex
+   notification ordering and token scope). They are being prepared as a
+   separate change.
+2. D07: merge the pure usage-ledger modules (`duet/usage`, the Claude
+   status-line parser), then add persisted, transactional reservations across
+   runs, the usage CLI/JSON, and ingestion from provider turns.
+3. A person with both CLIs logged in runs `PEER_ALPHA_TEST.md` (AT01–AT03).
 
 ## Uncommitted files
 

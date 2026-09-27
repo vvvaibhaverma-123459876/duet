@@ -11,8 +11,11 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | D03 Workspace & evidence gate | done | see HANDOFF | `duet/workspaces`, `duet/verification` | 58 new tests; suite 445/1 skipped | pending (no Codex) | n/a |
 | D04 Provider adapters | done | see HANDOFF | `duet/providers` (+ legacy cumulative-cost fix) | 46 new tests; suite 491/1 skipped | pending (no Codex) | NOT_RUN (no Codex login; api.openai.com blocked) |
 | D05 MCP pair slice | done | see HANDOFF | `duet/runtime/{pairing,service,peers}.py`, `duet/integrations/mcp_server.py`, `duet/cli_v2.py`, instructions/skill | 48 new integration tests; suite 537/6 skipped (no SDK), 541/4 (mcp 2.2.0) | pending (no Codex) | NOT_RUN (peer-alpha **not** earned: no real pair run) |
-| D06–D14 | not started | | | | | |
+| D06 Task graph & scheduler | done | `619ca53` | `runtime/{taskplan,scheduler,taskgraph}.py`, migration 0004, 5 tools, evidence-only contributions; plus review fixes | 82 sim + 22 integration + 8 verification tests; suite 651/6 (core), 656/4 (mcp) | internal Claude review of D01–D05 done (findings fixed or in progress); Codex review pending | n/a |
+| D07–D14 | not started (D07 pure ledger in progress) | | | | | |
 
 Independent review: Codex is not installed or authenticated in this
 environment, so no Claude–Codex review has taken place. Every milestone
-carries **review pending** until one is recorded.
+carries **review pending** until one is recorded. Two internal Claude review
+agents audited D01–D05 (reproduced findings; see `D06_REPORT.md`). That is
+not the cross-provider review the specification requires.
