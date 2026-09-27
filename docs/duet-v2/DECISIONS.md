@@ -511,3 +511,11 @@ validators. D04 code is unchanged.
 - **Final report.** It carries the resolved policy with its hash, so a report can be traced to the exact limits it ran under.
 - **Platforms.** Platforms are claimed only from real CI runs. macOS gets a non-blocking CI job; it is "being measured" until it passes. Windows is unsupported.
 - **Proposed CLI verbs.** `run --engine peer`, `pause`, `explain` and `export` are not added. Existing commands cover them, and adding aliases would widen the legacy surface for no capability.
+
+## D-035: Release scope without live evidence (D14)
+
+- No release label is claimed. The simulated gates pass, but peer alpha requires real two-way native collaboration, and that is NOT_RUN.
+- `EVALUATION.md` reports no comparative results, only the protocol. Simulated behaviour is not presented as performance.
+- Pairing is not promoted to the default strategy. `duet run` keeps its legacy behaviour.
+- Where the specification allows "otherwise disclose incomplete control" (AT43, AT45), disclosure is the implemented behaviour and is tested through `duet capabilities`.
+- The final report now exports resources (usage per provider and metric, with unknowns counted; actions by type and state) alongside the policy, so AT48's "resources" is part of the export.

@@ -167,3 +167,32 @@ def test_stopping_duet_leaves_unrelated_sessions_alone(tmp_path):
         unrelated.kill()
         unrelated.wait()
     assert ScriptedProvider  # imported for the factory
+
+
+def test_an_integration_after_submission_voids_the_tested_tree(pair):
+    """AT47: work integrated after a snapshot was checked and approved makes
+    that evidence stale; the integrated revision is checked and reviewed
+    again before the run can complete."""
+    co = pair.co
+    co.claim(pair.claude)
+    (pair.main.path / "calc.py").write_text(MUL)
+    first = co.submit(pair.claude, request_review=False)["snapshot_id"]
+    assert co.wait_for_checks(first, 60)
+    task = pair.isolated_task()
+    own = co.claim(pair.codex, task_id=task)
+    with open(os.path.join(own["workspace"], "util.py"), "w") as handle:
+        handle.write(UTIL)
+    co.graph.complete_task(pair.codex, task_id=task, summary="util.double added")
+    assert co.graph.decide_task(pair.claude, task_id=task, decision="accept", reason="ok")["integration"]["integrated"]
+    co.send(pair.codex, kind="REVIEW_RESULT", body="mul ok", snapshot_id=first, review={"disposition": "approve", "scope": ["calc.py"]})
+    co.try_complete(pair.run_id)
+    assert pair.lifecycle() != "COMPLETED_VERIFIED"  # the approved tree is no longer the files
+    co.claim(pair.claude)
+    second = co.submit(pair.claude, request_review=False)["snapshot_id"]
+    assert second != first and co.wait_for_checks(second, 60)
+    co.send(pair.codex, kind="REVIEW_RESULT", body="mul ok", snapshot_id=second, review={"disposition": "approve", "scope": ["calc.py"]})
+    co.try_complete(pair.run_id)
+    assert pair.lifecycle() != "COMPLETED_VERIFIED"  # util.py, integrated, still needs its non-author
+    co.send(pair.claude, kind="REVIEW_RESULT", body="util ok", snapshot_id=second, review={"disposition": "approve", "scope": ["util.py"]})
+    co.try_complete(pair.run_id)
+    assert pair.lifecycle() == "COMPLETED_VERIFIED"

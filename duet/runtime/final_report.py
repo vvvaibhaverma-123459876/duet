@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
 
 from ..verification.acceptance import AcceptanceContract
@@ -63,6 +64,7 @@ def build(co: "PairCoordinator", run_id: str) -> dict:
         "admission": {"holds": status["admission"]["holds"], "finishing": status["admission"].get("finishing", [])},
         "limitations": list(LIMITATIONS),
         "policy": _policy(co, run_id),
+        "resources": _resources(tx, run_id),
     }
     if report["repository"]["deliverable_commit"] == settings.base_sha:
         report["repository"]["deliverable_commit"] = None
@@ -113,6 +115,30 @@ def build(co: "PairCoordinator", run_id: str) -> dict:
     return report
 
 
+def _resources(tx, run_id: str) -> dict:
+    """What the run recorded against its pools, per provider and metric, with
+    unknown quantities counted rather than guessed; and the actions it ran."""
+    usage: dict[tuple[str, str], dict] = {}
+    rows = tx.query(
+        "SELECT r.metric, r.quantity_json, r.quality, p.provider FROM usage_records r "
+        "LEFT JOIN participants p ON p.participant_id = r.participant_id WHERE r.run_id = ? ORDER BY r.rowid", (run_id,))
+    for row in rows:
+        entry = usage.setdefault((row["provider"] or "unknown", row["metric"]),
+                                 {"provider": row["provider"] or "unknown", "metric": row["metric"], "records": 0, "known_total": "0", "unknown": 0, "qualities": []})
+        entry["records"] += 1
+        if row["quality"] not in entry["qualities"]:
+            entry["qualities"].append(row["quality"])
+        try:
+            entry["known_total"] = str(Decimal(entry["known_total"]) + Decimal(str(json.loads(row["quantity_json"]))))
+        except (InvalidOperation, TypeError, ValueError):
+            entry["unknown"] += 1
+    actions: dict[str, dict[str, int]] = {}
+    for row in tx.query("SELECT type, state, COUNT(*) AS n FROM actions WHERE run_id = ? GROUP BY type, state", (run_id,)):
+        actions.setdefault(row["type"], {})[row["state"]] = row["n"]
+    return {"usage": list(usage.values()), "actions": actions,
+            "note": "recorded by DUET for the turns and checks it ran; estimated or unknown where the provider did not report"}
+
+
 def _policy(co: "PairCoordinator", run_id: str) -> dict:
     """The resolved authorisation policy of the run and its hash (no secrets live in it)."""
     row = co.runtime.store.read().get("runs", run_id)
@@ -154,5 +180,10 @@ def _render(report: dict) -> str:
     lines += [f"- **{m['item']}**: {m['detail']}. Next: {m['next']}." for m in report["missing"]] or ["- none"]
     if report["routing"]:
         lines += ["", "## Control coverage"] + [f"- {r['provider']} ({r['role']}): {r['profile']} [{r['coverage']}]" + ("" if r["floor_met"] else ", below floor by user pin") for r in report["routing"]]
+    resources = report.get("resources") or {}
+    lines += ["", "## Resources"]
+    lines += [f"- {u['provider']} {u['metric']}: {u['known_total']} over {u['records']} record(s)" + (f", {u['unknown']} unknown" if u["unknown"] else "")
+              + f" ({', '.join(u['qualities'])})" for u in resources.get("usage", [])] or ["- no usage recorded against a pool"]
+    lines += [f"- actions {kind}: " + ", ".join(f"{n} {state.lower()}" for state, n in sorted(states.items())) for kind, states in sorted(resources.get("actions", {}).items())]
     lines += ["", "## Limitations"] + [f"- {text}" for text in report["limitations"]]
     return "\n".join(lines) + "\n"

@@ -1,23 +1,63 @@
-# Handoff
+# Handoff (final, D14)
 
-## Current state
+## What this answers
 
-- Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
-  (updated with each milestone commit).
-- Last completed milestone: **D13** (hardening; see `SECURITY_MODEL.md`, `OPERATIONS.md`, `COMPATIBILITY.md`). Before that **D12** (native integrations and coverage). Before that **D11** (parallel work and recovery). Before that **D10** (final review and completion). Before that D09 (routing) and **D08** (see `D01_REPORT.md` to `D08_REPORT.md`). D06 is `619ca53`, the core review fixes are `e71d957`, the D07 ledger is `2b390ea`, and D07's persistence is `5814b11`. D08 is the commit that adds `docs/duet-v2/D08_REPORT.md`.
-- Changed in D08: `duet/usage/{estimation,admission,reservations}.py`, `duet/runtime/budgeting.py`, migration `0006_admission.sql`, and `duet/runtime/{api,pools,reducer,peers,pairing,service}.py`, `duet/cli.py`, `duet/cli_v2.py`. Tests: `tests/usage/test_admission.py`, `tests/runtime/test_finishing_reserves.py`, `tests/integrations/test_admission_service.py`; one service test was rewritten for D08 semantics.
-- `feat/isolate-modes` is merged in (`9db29f3`).
-- Suite after D12: core 868 passed/6 skipped; mcp 873/4 (root and non-root). After D11: 862/6 and 867/4. After D10: 857/6 and 862/4. After D09: 849/6 and 854/4. Earlier, after D08 plus the merged D06 review fixes (`fix-d06-review`, `6a9f5bd`) and the process/umask hardening, all on the final tree:
-  core only as root, 817 passed and 6 skipped (`python3 -m pytest -q -p no:cacheprovider tests`); with `mcp==2.2.0` (scratch `mcpvenv`) as root, 822 passed and 4 skipped; the **whole suite** as non-root (`ubuntu`, umask 002, own venv with `.[test,mcp]` in `/home/ubuntu/venv`, copy in `/home/ubuntu/duet-ci`), 822 passed and 4 skipped.
-- Review status: the internal Claude review of D06/D07 is done (13 reproductions) and every confirmed finding is fixed. The usage findings are in D08 (`D08_REPORT.md`) and the task-graph findings in `6a9f5bd` (`D06_REPORT.md`). The independent Codex review is still pending for D01–D08.
-- CI: `test_detached_descendant_is_killed_after_normal_exit` failed twice on non-root runners (`e71d957`, `5814b11`). It never reproduced locally (300+ runs, under load, as non-root with the MCP tests). The final group kill now re-sends until the group is empty, and the test reports the survivor's state, parent, group and session if it recurs. If it does, that output is the next lead.
-- The MCP tests need the extra: `pip install -e ".[test,mcp]"`. In this
-  environment a venv in the session scratchpad has it (`mcpvenv`).
+The specification asks: *what works, at which exact revision, under which
+client, platform and control modes, with which real verification evidence,
+and what remains unproven.*
 
-## How to run the tests here
+- **Revision:** the head of branch `claude/adoring-babbage-0ys7ui`, draft PR
+  https://github.com/vvvaibhaverma-123459876/duet/pull/2. The commit that
+  adds this file is the D14 revision. `git log -1` gives the exact SHA, and
+  the PR's checks show CI for it. Nothing is merged to `main`.
+- **What works (implemented and simulation-tested):**
+  - D00–D14 as described in `D01_REPORT.md`–`D13_REPORT.md`.
+  - An event-sourced runtime with a local service.
+  - Native and managed pairing over MCP.
+  - Task scheduling.
+  - Usage pools, admission and finishing reserves.
+  - Adaptive routing.
+  - Final-revision review with a deterministic report.
+  - Isolated parallel work.
+  - Reversible client integrations.
+  - Hardening.
+  - Every acceptance test has automated evidence or explicit disclosure (`ACCEPTANCE_RESULTS.md`).
+- **Where:** Linux, Python 3.11 and 3.13, root and non-root (CI and local). macOS: a non-blocking CI job, result recorded in `COMPATIBILITY.md`. Windows is unsupported.
+- **Control modes:**
+  - Managed sessions: push delivery, with model and effort enforced per turn where the CLI exposes them.
+  - Native sessions: checkpoint delivery (plus the optional Stop hook), with advisory model and effort. Subagents are not controlled.
+  - Live delivery: unavailable. (`duet capabilities`)
+- **Real verification evidence:** none. Real-provider tests are gated and NOT_RUN. No row is `LIVE_PROVEN`.
+- **Independent review:** the Codex review is pending for D01–D14. Internal Claude review agents are not independent.
+- **Release label:** none met (`RELEASE_CHECKLIST.md`).
 
-Since D01 the suite passes as root (`python3 -m pytest -q`). To also check
-non-root behaviour, mirror the tree into the ubuntu user's home:
+## Documents
+
+- `ACCEPTANCE_RESULTS.md`: every AT, with its evidence and status.
+- `EVALUATION.md`: no comparative results; the fixed protocol.
+- `RELEASE_CHECKLIST.md`: gates, the operator walkthrough, migration.
+- `CAPABILITY_MATRIX.md`: R and AT traceability.
+- `DECISIONS.md`: D-001 to D-035.
+- `SECURITY_MODEL.md`, `OPERATIONS.md`, `COMPATIBILITY.md`.
+- `PEER_ALPHA_TEST.md`: the real pair test procedure.
+
+## Commits
+
+Milestone commits are on the branch (`git log --oneline`): D13 is
+`b0f80cb`; D14 is the commit that adds `ACCEPTANCE_RESULTS.md`. Earlier
+reference points: D06 `619ca53`, the core review fixes `e71d957`, the D07
+ledger `2b390ea`, D07 persistence `5814b11`, the D06 review fixes
+`6a9f5bd`, and `feat/isolate-modes` merged at `9db29f3`.
+
+## How to run the tests
+
+```bash
+pip install -e ".[test,mcp]"
+python3 -m pytest -q                       # real-provider tests skip unless gated
+```
+
+To check non-root behaviour when working as root, mirror the tree to an
+unprivileged user:
 
 ```bash
 tar -C /home/user/duet --exclude=.git -cf - . | (mkdir -p /home/ubuntu/duet-ci && tar -C /home/ubuntu/duet-ci -xf -)
@@ -25,17 +65,20 @@ chown -R ubuntu /home/ubuntu/duet-ci
 su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no:cacheprovider"
 ```
 
-## Next safe step
+## Next steps (all need a person)
 
-1. D14: evaluation and release gates: ACCEPTANCE_RESULTS.md (every AT with evidence or explicit restriction), EVALUATION.md (only measured results; real-provider comparisons need a person with both CLIs), RELEASE_CHECKLIST.md, final handoff. Check the macOS CI job result and record it in COMPATIBILITY.md.
-2. A person with both CLIs logged in runs `PEER_ALPHA_TEST.md` (AT01–AT03).
+1. Run the real pair tests on a machine with both CLIs logged in, as non-root, per `PEER_ALPHA_TEST.md`: `DUET_REAL_PAIR=1` (AT01 and AT02 in both directions, AT03) and `DUET_REAL_PROVIDERS=1`. These use the account's quota; that is why they are gated.
+2. Run the independent Codex review of the branch and address its findings.
+3. Script the `EVALUATION.md` tasks and run the protocol before promoting pairing to a default.
+4. Record the `test-macos` result. If it fails, fix it or keep macOS unsupported.
+
+## Known risks
+
+- `test_detached_descendant_is_killed_after_normal_exit` failed twice on CI
+  non-root runners early on. It has been hardened and has been green since.
+  If it recurs, its diagnostic output names the surviving process.
+- There is no chaos harness. Crash recovery is tested at defined points only.
 
 ## Uncommitted files
 
-None after each milestone commit.
-
-## Open items needing a human
-
-- Real pair tests (AT01 native Claude, AT02 native Codex, AT03 managed), per
-  `PEER_ALPHA_TEST.md`, on a machine with both CLIs logged in, as non-root.
-- Independent Codex review of D01–D05 (no Codex login here).
+None.

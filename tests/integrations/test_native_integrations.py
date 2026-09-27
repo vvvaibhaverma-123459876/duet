@@ -148,3 +148,20 @@ def test_an_unavailable_native_peer_is_never_replaced(tmp_path):
     joined = co.join(None, provider="codex", run_id=started["run_id"], invite=started["invite"]["code"], host=str(ProcessIdentity.of(os.getppid())))
     co.disconnect(co.runtime.authenticate(joined["token"]))
     assert co.run_status(started["run_id"])["collaboration"] == "PEER_UNAVAILABLE" and launched == []
+
+
+def test_capabilities_disclose_what_duet_does_not_control(home):
+    """AT06/AT43/AT45: no live delivery is claimed, native model/effort is
+    advisory, and native subagents are disclosed as outside DUET's control."""
+    env = {**os.environ, "DUET_STATE_DIR": str(home["root"])}
+    proc = subprocess.run([sys.executable, "-m", "duet", "capabilities", "--json"], capture_output=True, text=True, env=env, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads(proc.stdout)
+    for provider in ("claude", "codex"):
+        entry = report["providers"][provider]
+        assert entry["live_delivery"].startswith("unavailable")
+        assert entry["native"]["model_effort"].startswith("advisory")
+        assert entry["native"]["subagents"].startswith("not observed")
+        assert "subagents" in entry["managed"]
+    human = subprocess.run([sys.executable, "-m", "duet", "capabilities"], capture_output=True, text=True, env=env, timeout=60)
+    assert human.returncode == 0 and "live delivery: unavailable" in human.stdout and "subagents:" in human.stdout

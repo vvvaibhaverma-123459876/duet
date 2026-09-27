@@ -154,6 +154,8 @@ def test_the_final_report_names_revisions_checks_and_missing_obligations(tmp_pat
     assert done["outcome"] == "COMPLETED_VERIFIED" and done["missing"] == [] and done["repository"]["deliverable_commit"]
     text = render_markdown(done)
     assert "**Outcome: COMPLETED_VERIFIED**" in text and snap in text and "none" in text.split("## Missing obligations")[1]
+    assert done["policy"]["resolved"] and done["resources"]["actions"]["check"]  # AT48: policy and resources exported
+    assert "## Resources" in text and "actions check:" in text
 
 
 def test_report_cli_help():

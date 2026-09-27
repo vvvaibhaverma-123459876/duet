@@ -63,9 +63,9 @@ compatibility.
 | AT15 | Hard billing cap unavailable | D08 | `test_an_unenforceable_cap_stops_paid_work_before_it_starts`, `test_a_provider_enforced_cap_is_passed_per_call` | TESTED_SIM |
 | AT16 | Small security-sensitive patch | D09 | `test_a_small_security_patch_gets_a_deep_review` | TESTED_SIM |
 | AT17 | Unsupported effort / org clamp | D09 | `test_a_refused_setting_is_downgraded_and_a_clamp_is_reported` | TESTED_SIM |
-| AT18 | User pins model/effort | D09/D12 | `test_a_user_pin_is_respected_even_below_the_floor` | TESTED_SIM (D09 part) |
+| AT18 | User pins model/effort | D09/D12 | `test_a_user_pin_is_respected_even_below_the_floor` | TESTED_SIM (managed sessions; native sessions keep their own settings, disclosed as advisory) |
 | AT19 | Missing dependency failure | D09 | `test_an_environment_failure_is_diagnosed_not_escalated` | TESTED_SIM |
-| AT20 | Repeated no-progress repairs | D06/D09 | `test_repeated_failures_replan_then_pause` (D06), `test_repeated_hypothesis_failures_replan_with_one_bounded_escalation` | TESTED_SIM (D09 part) |
+| AT20 | Repeated no-progress repairs | D06/D09 | `test_repeated_failures_replan_then_pause` (D06), `test_repeated_hypothesis_failures_replan_with_one_bounded_escalation` | TESTED_SIM |
 | AT21 | Old green suite, feature absent | D01/D10 | `test_a_suite_green_before_the_change_does_not_demonstrate_the_criterion` | TESTED_SIM |
 | AT22 | DONE with missing verifier | D01 | `test_d01_semantics.py::TestCompletion::test_done_with_missing_verifier_is_unverified`, battery `test_scratch_run_without_verifier_is_unverified` | TESTED_SIM |
 | AT23 | Approval of old revision | D10 | `test_an_approval_is_stale_after_a_change_unless_a_delta_review_names_its_basis` | TESTED_SIM |
@@ -76,7 +76,7 @@ compatibility.
 | AT28 | Concurrent writers | D11 | `test_two_agents_write_at_once_in_separate_checkouts` | TESTED_SIM |
 | AT29 | Crash around dispatch | D02/D11 | `test_an_integration_done_before_a_crash_is_not_repeated`, `test_in_doubt_is_never_redispatched` | TESTED_SIM |
 | AT30 | Crash during commit/integration | D11 | `test_an_integration_lost_before_it_wrote_is_redone_from_evidence`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (no chaos harness) |
-| AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex), `test_cancel_while_waiting` (pair wait wakes with CANCELLED) | TESTED_SIM (waiting, working); verifying across a crash: D11 |
+| AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex), `test_cancel_while_waiting` (pair wait wakes with CANCELLED) | TESTED_SIM (waiting, working; verifying across a restart: `test_restart_settles_interrupted_checks`, `test_interrupted_check_reopens_the_task`) |
 | AT32 | PID reuse / unrelated sessions | D11 | `test_stopping_duet_leaves_unrelated_sessions_alone` | TESTED_SIM |
 | AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval`, `test_message_text_carries_no_authority`, `test_authentication_rules` (identity never a parameter) | TESTED_SIM (runtime + service + `test_peer_text_cannot_grant_authority`); display sanitising `test_control_sequences_never_reach_a_screen` |
 | AT34 | Malformed/flooded provider output | D04 | legacy `test_process.py`; v2 `test_flood_is_bounded`, `test_stream_process_truncates_long_lines`, malformed-line and server-death tests | TESTED_SIM |
@@ -85,12 +85,12 @@ compatibility.
 | AT37 | Legacy transcript/config migration | D01/D13 | `test_v1_transcript_zero_cost_migrates_to_unknown`, `test_legacy_commands_keep_their_interface`; legacy `budget_usd` is never a v2 allowance (COMPATIBILITY.md) | TESTED_SIM |
 | AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, every packaged migration (0001–0009), participant instructions, Claude skill) | TESTED_SIM |
 | AT39 | Integration install/uninstall | D12/D13 | `test_setup_is_planned_approved_and_reversible`, `test_uninstall_leaves_what_the_user_changed_and_what_it_did_not_own` | TESTED_SIM (fake CLIs) |
-| AT40 | Quota reset with stale telemetry | D08/D11 | `test_quota_holds_probe_once_and_release`, `test_a_passive_quota_read_ends_the_pause_without_a_probe` | TESTED_SIM (D08 part); crash matrix: D11 |
+| AT40 | Quota reset with stale telemetry | D08/D11 | `test_quota_holds_probe_once_and_release`, `test_a_passive_quota_read_ends_the_pause_without_a_probe` | TESTED_SIM (in-doubt turns and integrations settled without re-dispatch; no chaos harness) |
 | AT41 | Mid-turn setting change unsupported | D04/D09 | `test_native_sessions_get_advice`, `test_profile_requests_raise_managed_and_advise_native` | TESTED_SIM |
 | AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |
 | AT43 | No sandbox for borrowed session | D12/D13 | `duet capabilities` reports native sessions as advisory coverage, not sandboxed; SECURITY_MODEL.md states cooperative containment only | DOCUMENTED + TESTED_SIM (capabilities output) |
 | AT44 | Same snapshot checked twice | D10 | `test_an_identical_snapshot_reuses_its_evidence` | TESTED_SIM |
-| AT45 | Native subagents spawn | D11 | | NOT_STARTED |
-| AT46 | Estimate overshoot before final usage | D08/D11 | `test_overshoot_is_recorded_not_hidden`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (D08 part); crash matrix: D11 |
-| AT47 | Integration changes tested tree | D10/D11 | | NOT_STARTED |
-| AT48 | Release handoff | D14 | | NOT_STARTED |
+| AT45 | Native subagents spawn | D11/D12 | `test_capabilities_disclose_what_duet_does_not_control` (native subagents disclosed as not observed/limited; managed subagent usage included in turn totals) | DISCLOSED (not controlled) + TESTED_SIM |
+| AT46 | Estimate overshoot before final usage | D08/D11 | `test_overshoot_is_recorded_not_hidden`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (in-doubt turns and integrations settled without re-dispatch; no chaos harness) |
+| AT47 | Integration changes tested tree | D10/D11 | `test_an_integration_after_submission_voids_the_tested_tree` | TESTED_SIM |
+| AT48 | Release handoff | D14 | `test_the_final_report_names_revisions_checks_and_missing_obligations` (commit, checks, reviews, modes, policy, resources, limitations); ACCEPTANCE_RESULTS.md, RELEASE_CHECKLIST.md | TESTED_SIM |

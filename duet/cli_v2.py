@@ -432,12 +432,15 @@ def _capabilities(args) -> int:
         binary = _bin(provider)
         entry: dict = {
             "cli": binary,
-            "managed": {"delivery": "push (DUET starts a turn when a message arrives)", "model_effort": "set per turn when the CLI exposes them (see --probe)"},
+            "managed": {"delivery": "push (DUET starts a turn when a message arrives)", "model_effort": "set per turn when the CLI exposes them (see --probe)",
+                        "subagents": ("accounted, not limited: a turn's reported usage includes the subagents it spawned; DUET cannot cap them individually"
+                                      if provider == "claude" else "not reported separately: counted only as part of the turn's usage")},
             "native": {
                 "delivery": ("checkpoint: the session sees messages when it calls duet_wait/duet_status"
                              + ("; the Stop hook asks it to answer pending requests before it stops" if provider == "claude" and "claude-stop-hook" in installed else "")),
                 "model_effort": "advisory: DUET never changes a native session's model or effort",
                 "identity": "connection-bound (the MCP proxy's host process)",
+                "subagents": "not observed, accounted or limited: the session's own subagents and tools are outside DUET's control",
             },
             "live_delivery": ("unavailable: Claude Channels is a preview feature that DUET does not enable without your explicit approval"
                               if provider == "claude" else "unavailable: no supported live-control endpoint for an existing Codex session"),
@@ -467,6 +470,7 @@ def _capabilities(args) -> int:
         print(f"  managed: {entry['managed']['delivery']}; model/effort {entry['managed']['model_effort']}")
         print(f"  native:  {entry['native']['delivery']}; model/effort {entry['native']['model_effort']}")
         print(f"  live delivery: {entry['live_delivery']}")
+        print(f"  subagents: managed {entry['managed']['subagents']}; native {entry['native']['subagents']}")
     print("integrations installed: " + (", ".join(installed) or "none"))
     return 0
 
