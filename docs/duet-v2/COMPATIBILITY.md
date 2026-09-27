@@ -5,7 +5,7 @@
 | Tier | Platform | Evidence |
 |---|---|---|
 | Supported | Linux (Ubuntu), Python 3.11 and 3.13, as a normal user and as root, with and without the MCP SDK | CI on every push: `test (3.11)`, `test (3.13)`, `test-as-root`. Local runs of the whole suite as root and as non-root (umask 002). |
-| Being measured | macOS, Python 3.13 | CI job `test-macos` (non-blocking). It is not claimed as supported until it passes. Known gap: the Stop hook's session lookup uses `/proc`, so on macOS it finds no session and lets the stop proceed. |
+| Being measured | macOS, Python 3.13 | CI job `test-macos` (non-blocking). Its first run (on `b0f80cb`) **failed**: 22 failures and 54 errors, 815 passed. Almost all came from process identities exceeding the 128-character id limit (a 70-character runner hostname plus the raw `kern.boottime` text). One test assumed exact liveness without `/proc`. Both are fixed: the boot time is stored as `boottime:<sec>`, long hostnames are hashed, and the `/proc`-only test is skipped elsewhere. macOS is not claimed as supported until a run passes. Known gap: the Stop hook's session lookup uses `/proc`, so on macOS it finds no session and lets the stop proceed. |
 | Untested | WSL | Expected to behave as Linux; no evidence yet. |
 | Unsupported | Native Windows | Unix sockets, process groups, `flock` and `/proc` are assumed throughout. |
 

@@ -648,6 +648,7 @@ class TestProcessIdentity:
     def test_other_host_is_not_judged(self):
         assert replace(ProcessIdentity.current(), host="elsewhere.example").is_alive()
 
+    @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="exact non-spawning liveness needs /proc; elsewhere it is conservative (TestLivenessWithoutProcfs)")
     def test_non_spawning_mode_matches_full_check_with_procfs(self):
         me = ProcessIdentity.current()
         assert me.is_alive(allow_subprocess=False)
@@ -656,7 +657,24 @@ class TestProcessIdentity:
 
 
 FAKE_BOOT = "{ sec = 1790000000, usec = 0 } Mon Sep 21 10:00:00 2026"
+FAKE_BOOT_ID = "boottime:1790000000"  # what boot_id() makes of FAKE_BOOT
 FAKE_START = "Mon Sep 27 09:00:00 2026"
+
+
+def test_identities_fit_the_id_limit_with_long_hosts_and_darwin_boot_times(monkeypatch):
+    """macOS CI: a 70-character hostname and the raw kern.boottime text made
+    every identity longer than MAX_ID, so no session could join."""
+    import duet.runtime.identity as identity
+    from duet.runtime.contracts import MAX_ID
+
+    assert identity._darwin_boot(FAKE_BOOT + "\n") == FAKE_BOOT_ID
+    long_name = "sat12-dp151-b521871a-60ff-4c99-b5eb-2dfa49797465-227ECCF1AEE9.local"
+    monkeypatch.setattr(identity.socket, "gethostname", lambda: long_name)
+    host = identity.host_name()
+    assert host == identity.host_name() and host != long_name and len(host) <= identity.MAX_HOST
+    ident = ProcessIdentity(host, FAKE_BOOT_ID, 4_194_304, FAKE_START)
+    assert len(str(ident)) <= MAX_ID and ProcessIdentity.parse(str(ident)) == ident
+    assert replace(ident, host="elsewhere.example").is_alive()  # another host is never judged
 
 
 class TestLivenessWithoutProcfs:
@@ -668,7 +686,6 @@ class TestLivenessWithoutProcfs:
 
     @pytest.fixture()
     def no_proc(self, rt, monkeypatch):
-        import socket
         import types
 
         import duet.runtime.identity as identity
@@ -699,13 +716,13 @@ class TestLivenessWithoutProcfs:
         clear = getattr(identity.boot_id, "cache_clear", None)
         if clear:
             clear()
-        yield types.SimpleNamespace(calls=calls, host=socket.gethostname())
+        yield types.SimpleNamespace(calls=calls, host=identity.host_name())
         if clear:
             clear()  # never leak the fake boot id into other tests
 
     @staticmethod
     def owner(env, pid: int) -> str:
-        return str(ProcessIdentity(env.host, FAKE_BOOT, pid, FAKE_START))
+        return str(ProcessIdentity(env.host, FAKE_BOOT_ID, pid, FAKE_START))
 
     def test_reconcile_spawns_nothing_inside_the_transaction(self, rt, pair, no_proc):
         rt.acquire_lease(CONTROLLER, "integration:dead", owner=self.owner(no_proc, 999_999_999), lease_seconds=3600)
@@ -743,10 +760,10 @@ class TestLivenessWithoutProcfs:
     def test_boot_id_is_computed_once_per_process(self, no_proc):
         import duet.runtime.identity as identity
 
-        ident = ProcessIdentity(no_proc.host, FAKE_BOOT, os.getpid(), FAKE_START)
+        ident = ProcessIdentity(no_proc.host, FAKE_BOOT_ID, os.getpid(), FAKE_START)
         assert ident.is_alive() and ident.is_alive()
         assert not replace(ident, start="other").is_alive()
-        assert identity.boot_id() == FAKE_BOOT
+        assert identity.boot_id() == FAKE_BOOT_ID
         assert [c[0] for c in no_proc.calls].count("sysctl") == 1
         no_proc.calls.clear()
         assert ident.is_alive(allow_subprocess=False)

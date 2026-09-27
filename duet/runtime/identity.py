@@ -18,6 +18,7 @@ import functools
 import hashlib
 import hmac
 import os
+import re
 import secrets
 import socket
 import subprocess
@@ -45,6 +46,26 @@ def _has_procfs() -> bool:
     return Path("/proc/self/stat").exists()
 
 
+MAX_HOST = 40
+
+
+def host_name() -> str:
+    """This machine's name as stored in identities: the hostname, or a stable
+    hash of it when it is long (macOS CI runners use 70-character names), so
+    a serialised identity always fits the runtime's 128-character id limit."""
+    name = socket.gethostname()
+    if len(name) <= MAX_HOST:
+        return name
+    return "h-" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+
+
+def _darwin_boot(raw: str) -> str:
+    """`sysctl -n kern.boottime` prints '{ sec = N, usec = M } <date>'; the
+    seconds identify the boot compactly (and '|' never appears)."""
+    match = re.search(r"sec\s*=\s*(\d+)", raw)
+    return f"boottime:{match.group(1)}" if match else (raw.strip().replace("|", "/")[:40] or "unknown")
+
+
 @functools.lru_cache(maxsize=1)
 def boot_id() -> str:
     """The kernel boot id. It cannot change while this process runs, so it is
@@ -56,7 +77,7 @@ def boot_id() -> str:
     if sys.platform == "darwin":
         try:
             out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
-            return out.strip() or "unknown"
+            return _darwin_boot(out)
         except (OSError, subprocess.SubprocessError):
             pass
     return "unknown"
@@ -120,7 +141,7 @@ class ProcessIdentity:
     def of(cls, pid: int) -> "ProcessIdentity":
         """Identity of another local process (e.g. the agent CLI hosting an
         MCP server). The start time distinguishes a reused pid."""
-        return cls(socket.gethostname(), boot_id(), pid, process_start(pid) or "unknown")
+        return cls(host_name(), boot_id(), pid, process_start(pid) or "unknown")
 
     def is_alive(self, allow_subprocess: bool = True) -> bool:
         """True only if this exact process (same host, boot, pid and start
@@ -132,7 +153,7 @@ class ProcessIdentity:
         same; elsewhere the check degrades conservatively: the process is dead
         only if its boot id (when already cached) differs or its pid does not
         exist at all; otherwise it is assumed alive."""
-        if self.host != socket.gethostname():
+        if self.host != host_name():
             return True
         if not allow_subprocess and not _has_procfs():
             if boot_id.cache_info().currsize and self.boot != boot_id():
