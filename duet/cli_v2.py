@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .runtime.contracts import TERMINAL_RUN, DomainError, RunLifecycle
 
-V2_COMMANDS = {"pair", "mcp", "service"}
+V2_COMMANDS = {"pair", "mcp", "service", "usage"}
 
 
 def add_parsers(sub) -> None:
@@ -46,6 +46,24 @@ def add_parsers(sub) -> None:
         cmd.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
 
 
+def add_usage_parser(sub) -> None:
+    usage = sub.add_parser("usage", help="local usage pools and recorded usage (v2)")
+    usage.add_argument("--run", default=None, metavar="RUN_ID", help="also show the usage recorded for this run")
+    usage.add_argument("--json", action="store_true", help="versioned JSON output")
+    usage.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    usage_sub = usage.add_subparsers(dest="usage_command")
+    pool = usage_sub.add_parser("pool", help="define usage pools")
+    pool_sub = pool.add_subparsers(dest="pool_command", required=True)
+    set_ = pool_sub.add_parser("set", help="define or change a pool (you authorise the allowance; agents cannot)")
+    set_.add_argument("pool_id")
+    set_.add_argument("--provider", required=True, choices=["claude", "codex"])
+    set_.add_argument("--metric", required=True, choices=["turns", "cost.estimated_usd"], help="what the pool counts")
+    set_.add_argument("--allowance", default=None, help="the allowance (an integer, or a decimal for cost); omit for tracking only")
+    set_.add_argument("--window-seconds", type=int, default=None, help="rolling window; omit for the lifetime of the pool")
+    set_.add_argument("--enforcement", choices=["local_bound", "best_effort"], default="local_bound")
+    set_.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+
+
 def extend_legacy(status_parser, stop_parser) -> None:
     status_parser.add_argument("--run", default=None, metavar="RUN_ID", help="show a v2 pair run instead of detecting sessions")
     status_parser.add_argument("--json", action="store_true", help="with --run: versioned JSON output")
@@ -68,6 +86,8 @@ def dispatch(args) -> int:
             return serve(args.state_root, args.token_file)
         if args.command == "service":
             return _service(args)
+        if args.command == "usage":
+            return _usage(args)
         if args.command == "status":
             return _run_status(args)
         if args.command == "stop":
@@ -262,3 +282,52 @@ def _run_stop(args) -> int:
         _local_coordinator(paths).cancel(args.run, reason="stopped with duet stop (service not running)")
     print(f"cancelled {args.run}")
     return 0
+
+
+def _usage(args) -> int:
+    from .runtime.api import Runtime
+    from .runtime.contracts import USER
+    from .runtime.pools import PoolStore
+    from .runtime.store import Store
+
+    paths = _paths(args)
+    store = PoolStore(Runtime(Store(paths.db)))
+    if getattr(args, "usage_command", None) == "pool":
+        unit = "turns" if args.metric == "turns" else "USD"
+        status = store.define_pool(
+            USER, args.pool_id, provider=args.provider, metric=args.metric, unit=unit,
+            allowance=args.allowance, window_seconds=args.window_seconds, enforcement=args.enforcement,
+        )
+        print(json.dumps(status, indent=2) if args.json else _format_pool(status))
+        return 0
+    report = {"schema": "duet.usage/1", "pools": store.status(), "run": None}
+    if args.run:
+        report["run"] = {"run_id": args.run, "records": store.run_usage(args.run)}
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    if not report["pools"]:
+        print("no usage pools defined (DUET tracks provider turns and cost only against pools you define)")
+    for pool in report["pools"]:
+        print(_format_pool(pool))
+    if report["run"] is not None:
+        records = report["run"]["records"]
+        print(f"run {args.run}: {len(records)} usage record(s)")
+        for record in records:
+            quantity = record["quantity"] if record["quantity"] is not None else "unknown"
+            print(f"  {record['observed_at']}  {record['pool_id']:<24} {record['metric']:<20} {quantity} ({record['quality']})")
+    return 0
+
+
+def _format_pool(pool: dict) -> str:
+    window = f" per {pool['window_seconds']}s" if pool["window_seconds"] else ""
+    allowance = pool["allowance"] if pool["allowance"] is not None else "untracked limit"
+    line = (
+        f"{pool['pool_id']}: {pool['provider']} {pool['metric']} used {pool['used']}, reserved {pool['held']}, "
+        f"allowance {allowance}{window} [{pool['enforcement']}]"
+    )
+    if pool["available"] is not None:
+        line += f", available {pool['available']}"
+    if pool["uncertain"]:
+        line += f" (uncertain: {pool['unknown_records']} record(s) of unknown size)"
+    return line

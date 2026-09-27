@@ -843,6 +843,13 @@ class Runtime:
 
         def run(tx: Tx) -> dict:
             self._live_run(tx, run_id)
+            if reserve:
+                # Allowance checks run in this transaction: no other run or
+                # process can take the same capacity in between (D07).
+                from .pools import check_reservation
+
+                for res in clean_reservations:
+                    check_reservation(tx, res["pool"], res["quantity"])
             task_revision = None
             if task_id is not None:
                 task = tx.require("tasks", task_id)

@@ -87,8 +87,13 @@ if MODE == "peer":
     config = json.loads(opt("--mcp-config") or "{}")
     text = agent_brain.act(prompt, (config.get("mcpServers") or {}).get("duet"))
     emit({"type": "assistant", "parent_tool_use_id": None, "message": {"id": "msg_1", "content": [{"type": "text", "text": text}], "usage": {"input_tokens": 10, "output_tokens": 1}}})
+    # Like real Claude Code >= 2.1.277, a resumed session reports its
+    # cumulative cost: 0.01 per turn so far in this session.
+    turns_file = Path(os.environ.get("FAKE_BRAIN_STATE", "/tmp")) / f"claude-session-{session}.turns"
+    turns = int(turns_file.read_text()) + 1 if turns_file.exists() else 1
+    turns_file.write_text(str(turns))
     emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "duration_ms": 12, "result": text,
-          "total_cost_usd": 0.01, "usage": {"input_tokens": 10, "output_tokens": 1}})
+          "total_cost_usd": round(0.01 * turns, 6), "usage": {"input_tokens": 10, "output_tokens": 1}})
     sys.exit(0)
 
 emit({"type": "assistant", "parent_tool_use_id": None, "message": {"id": "msg_1", "content": [{"type": "text", "text": f"Working on: {prompt[:30]}"}], "usage": {"input_tokens": 10, "output_tokens": 1}}})

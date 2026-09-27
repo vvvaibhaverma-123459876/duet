@@ -31,7 +31,7 @@ compatibility.
 | R03 | Two-way initiative | D05 | TESTED_SIM (either side asks at any time; non-blocking send; waits wake on questions) — real models: NOT_RUN |
 | R04 | One objective/contract | D02, D06 | TESTED_SIM (one run, versioned acceptance contract, user-only changes; shared plans only add tasks and cannot touch the objective or contract) |
 | R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
-| R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
+| R06 | Honest resources | D01, D07 | TESTED_SIM (legacy nullable cost; v2 observations with quality/scope/epoch, unknown never zero, context and quota as gauges, deduplicated pool records, cumulative totals as deltas) |
 | R07 | Completion reserve | D08 | NOT_STARTED |
 | R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery from help/model catalogue; requested/accepted/observed recorded; unsupported rejected); routing: D09 |
 | R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM: legacy (D01) and v2 predicate with controller-only finalisation (D03); joint authorship: D10 |
@@ -53,10 +53,10 @@ compatibility.
 | AT05 | Redelivery/reconnect | D02/D05 | `test_redelivery_until_acknowledged`, `test_unacknowledged_messages_are_redelivered_after_reconnect`, `test_proxy_restart_reconnects_the_same_session` (MCP), `test_restart_settles_interrupted_checks` | TESTED_SIM |
 | AT06 | Live delivery unsupported | D12 | | NOT_STARTED |
 | AT07 | Peer quota before mandatory review | D08 | | NOT_STARTED |
-| AT08 | Unknown usage | D07 | | NOT_STARTED |
-| AT09 | Two runs share pool | D07 | | NOT_STARTED |
-| AT10 | Duplicate cumulative telemetry | D07 | | NOT_STARTED |
-| AT11 | Context counter changes | D07 | | NOT_STARTED |
+| AT08 | Unknown usage | D07 | `test_unknown_usage_is_never_zero`, `test_absent_final_usage_after_cancellation_stays_unknown`, `test_usage_records_are_deduplicated_and_unknown_is_not_zero` (pool marked uncertain) | TESTED_SIM |
+| AT09 | Two runs share pool | D07 | `test_two_models_and_two_runs_share_one_pool_without_double_counting`, `test_reservations_draw_down_and_refuse_atomically`, `test_two_processes_cannot_both_take_the_last_unit` | TESTED_SIM |
+| AT10 | Duplicate cumulative telemetry | D07 | `test_statusline_and_cli_result_count_the_same_turn_once`, `test_replayed_codex_updates_count_once`, `test_cumulative_resume_totals_become_deltas`, emulated pair cost pool | TESTED_SIM |
+| AT11 | Context counter changes | D07 | `test_context_occupancy_never_enters_consumption`, `test_a_decrease_is_a_reset_not_a_negative_or_absolute_delta` | TESTED_SIM |
 | AT12 | External usage consumes capacity | D08 | | NOT_STARTED |
 | AT13 | Optional work vs finishing reserve | D08 | | NOT_STARTED |
 | AT14 | Mandatory action draws reserve once | D08 | | NOT_STARTED |

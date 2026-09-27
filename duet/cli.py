@@ -265,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     replay.add_argument("transcript_json")
 
     cli_v2.add_parsers(sub)
+    cli_v2.add_usage_parser(sub)
     cli_v2.extend_legacy(status, stop)
 
     init = sub.add_parser("init")

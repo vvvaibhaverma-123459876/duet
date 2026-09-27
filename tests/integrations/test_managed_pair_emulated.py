@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,13 @@ def test_duet_pair_with_emulated_managed_sessions(tmp_path):
     )
     env.pop("DUET_MANAGED_PEER", None)
     paths = ServicePaths.for_root(state / "v2")
+    for pool in (
+        ["claude-turns", "--provider", "claude", "--metric", "turns", "--allowance", "10"],
+        ["codex-turns", "--provider", "codex", "--metric", "turns", "--allowance", "10"],
+        ["claude-cost", "--provider", "claude", "--metric", "cost.estimated_usd", "--allowance", "1.00"],
+    ):
+        defined = subprocess.run([sys.executable, "-m", "duet", "usage", "pool", "set", *pool], env=env, capture_output=True, text=True, timeout=60)
+        assert defined.returncode == 0, defined.stderr
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "duet", "pair", "add mul(a, b) to calc.py", "--repo", str(repo),
@@ -86,6 +94,12 @@ def test_duet_pair_with_emulated_managed_sessions(tmp_path):
         assert git("status", "--porcelain", cwd=repo) == ""
         assert store.verify_replay() == []
         store.close()
+        usage = json.loads(subprocess.run([sys.executable, "-m", "duet", "usage", "--run", run_id, "--json"], env=env, capture_output=True, text=True, timeout=60).stdout)
+        pools = {p["pool_id"]: p for p in usage["pools"]}
+        assert pools["claude-turns"]["used"] == "3" and pools["codex-turns"]["used"] == "3"
+        # Cumulative session cost (0.01, 0.02, 0.03) became per-turn deltas, recorded as estimates.
+        assert Decimal(pools["claude-cost"]["used"]) == Decimal("0.03") and not pools["claude-cost"]["uncertain"]
+        assert {r["quality"] for r in usage["run"]["records"] if r["pool_id"] == "claude-cost"} == {"estimated"}
     finally:
         if service_running(paths):
             ServiceClient.as_controller(paths).call("shutdown")

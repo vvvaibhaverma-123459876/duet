@@ -140,6 +140,15 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
         "intervention_id",
         ("intervention_id", "run_id", "status", "task_id", "reason", "evidence_json", "fingerprint", "created_at"),
     ),
+    # D07: usage pools and records (migration 0005)
+    "usage_pools": (
+        "pool_id",
+        ("pool_id", "provider", "metric", "unit", "allowance_json", "window_seconds", "enforcement", "defined_by", "created_at", "updated_at"),
+    ),
+    "usage_records": (
+        "record_id",
+        ("record_id", "pool_id", "run_id", "action_id", "participant_id", "metric", "quantity_json", "quality", "source", "observed_at", "created_at"),
+    ),
 }
 REPLAYED_TABLES = tuple(TABLES)
 
@@ -898,6 +907,42 @@ def _intervention_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
     ]
 
 
+ENFORCEMENT = ("local_bound", "best_effort", "provider_cap")
+
+
+def _pool_defined(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    if p["enforcement"] not in ENFORCEMENT:
+        raise ValidationError(f"enforcement must be one of {ENFORCEMENT}")
+    existing = get("usage_pools", p["pool_id"])
+    return [
+        (
+            "usage_pools",
+            {
+                "pool_id": p["pool_id"], "provider": p["provider"], "metric": p["metric"], "unit": p["unit"],
+                "allowance_json": _j(p["allowance"]) if p.get("allowance") is not None else None,
+                "window_seconds": p.get("window_seconds"), "enforcement": p["enforcement"], "defined_by": p["defined_by"],
+                "created_at": existing["created_at"] if existing else e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _usage_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "usage_pools", p["pool_id"])
+    if get("usage_records", p["record_id"]) is not None:
+        raise InvalidTransition(f"usage record {p['record_id']} already exists")
+    return [
+        (
+            "usage_records",
+            {
+                "record_id": p["record_id"], "pool_id": p["pool_id"], "run_id": p.get("run_id"), "action_id": p.get("action_id"),
+                "participant_id": p.get("participant_id"), "metric": p["metric"], "quantity_json": _j(p["quantity"]),
+                "quality": p["quality"], "source": p["source"], "observed_at": p["observed_at"], "created_at": e.at,
+            },
+        )
+    ]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -936,6 +981,8 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "task.result.decided": _task_result_decided,
     "contribution.recorded": _contribution_recorded,
     "intervention.recorded": _intervention_recorded,
+    "pool.defined": _pool_defined,
+    "usage.recorded": _usage_recorded,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

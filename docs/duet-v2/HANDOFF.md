@@ -4,11 +4,9 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D06** (see `D01_REPORT.md` to `D06_REPORT.md`), pushed as `619ca53`.
+- Last completed milestone: **D07** (see `D01_REPORT.md` to `D07_REPORT.md`). D06 is `619ca53`, the core review fixes are `e71d957`, and the D07 ledger is `2b390ea`.
 - `feat/isolate-modes` is merged in (`9db29f3`).
-- Suite after D06, as root: 651 passed, 6 skipped without the MCP SDK; 656
-  passed, 4 skipped with `mcp==2.2.0`. Integration, verification and runtime
-  tests as non-root: 291 passed, 2 skipped.
+- Suite after D07: see the latest commit message. Both configurations (core only, and with `mcp==2.2.0`) pass as root, and the integration, verification and runtime tests pass as non-root.
 - The MCP tests need the extra: `pip install -e ".[test,mcp]"`. In this
   environment a venv in the session scratchpad has it (`mcpvenv`).
 
@@ -25,15 +23,13 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-1. Merge the core-module review fixes (process groups, no subprocess inside
-   write transactions, strict worktrees leaving `.git/info/exclude` alone,
-   symlinked import parents, the legacy budget note, the legacy cost scope,
-   provider API keys removed from managed peers' environment, Codex
-   notification ordering and token scope). They are being prepared as a
-   separate change.
-2. D07: merge the pure usage-ledger modules (`duet/usage`, the Claude
-   status-line parser), then add persisted, transactional reservations across
-   runs, the usage CLI/JSON, and ingestion from provider turns.
+1. D08: completion-aware admission. Pre-dispatch estimates per provider and
+   pool with matching scopes, finishing reserves for the required review,
+   repair and checks (a Claude review must be funded from Claude capacity),
+   reset-aware pause and resume (`PAUSED_QUOTA`), and a label saying how
+   each pool is enforced. Build on `runtime/pools.py` (the atomic check) and
+   `duet.usage.Ledger` (observed consumption and quota gauges).
+2. Run an internal review agent over D06–D07 before D08 grows on them.
 3. A person with both CLIs logged in runs `PEER_ALPHA_TEST.md` (AT01–AT03).
 
 ## Uncommitted files

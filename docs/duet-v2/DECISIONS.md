@@ -333,3 +333,30 @@ update, so its `turn`-scoped observations are not the turn's usage. The
 ledger therefore uses the thread `total` as primary. Adapters from a
 `TurnResult` drop `last`. Raw notifications keep it, as call-scoped
 validators. D04 code is unchanged.
+
+## D-026: Local usage pools and reservations (D07)
+
+- A pool (`usage_pools`, migration 0005) is a user-defined allowance for one
+  provider metric (`turns` or `cost.estimated_usd`), with an optional rolling
+  window. Only the user can define or change one (`duet usage pool set`), so
+  agents and the controller can never create or widen spending authority.
+  Enforcement is `local_bound` (refuses), `best_effort` (reports only) or
+  `provider_cap` (mirrors a provider-enforced limit).
+- The capacity check runs inside `plan_action`'s write transaction. SQLite's
+  write lock serialises it across processes, so two runs cannot both take
+  the last of an allowance. Consumption is the known usage records in the
+  window plus reservations still HELD. Held reservations count until an
+  explicit outcome, and in-doubt ones until reconciled.
+- Usage records are keyed by a dedupe identity (`<action>:<pool>`), so
+  replays and delayed duplicates count once. The same identity with a
+  different quantity is a conflict. A record of unknown size makes the pool
+  `uncertain`, never zero.
+- Managed turns reserve 1 from each matching turns pool. Cost pools get a
+  zero reservation, which refuses a turn once the pool is exhausted but
+  cannot stop one turn from overshooting; per-turn estimates are D08's.
+  The turn's cost delta comes from the usage ledger, which turns a resumed
+  session's cumulative figure into a delta. It is recorded as `estimated`,
+  or `unknown` when it cannot be derived (Codex reports no cost).
+- A pool is not a view of the provider's own quota. A local reservation
+  cannot lock provider-side capacity, and usage outside DUET is invisible
+  here. Quota windows are observed gauges in `duet.usage`.

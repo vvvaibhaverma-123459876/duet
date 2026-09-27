@@ -440,6 +440,31 @@ class TestManagedPeer:
         finally:
             service.close()
 
+    def test_local_turn_allowance_is_reserved_and_recorded(self, paths, tmp_path):
+        from duet.runtime.contracts import USER
+        from duet.runtime.pools import PoolStore
+
+        peers = {}
+        service = start(paths, peer_factory=factory_for({"codex": lambda tools, request: "noted"}, peers))
+        try:
+            PoolStore(service.runtime).define_pool(USER, "codex-turns", provider="codex", metric="turns", unit="turns", allowance=1)
+            repo = make_repo(tmp_path / "repo")
+            client = ServiceClient(paths)
+            joined = client.call("join", provider="claude", objective="x", repo=str(repo), checks=[CHECK], peer="managed")
+            me = client.with_token(joined["token"])
+            me.call("send", kind="FINDING", body="one")
+            assert wait_until(lambda: len(peers["codex"][1].requests) == 1, 20)
+            assert wait_until(lambda: PoolStore(service.runtime).status("codex-turns")[0]["used"] == "1", 20)
+            me.call("send", kind="FINDING", body="two")
+            assert wait_until(lambda: me.call("status")["collaboration"] == "PEER_UNAVAILABLE", 20)
+            assert len(peers["codex"][1].requests) == 1  # the second turn was never dispatched
+            notes = [m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"]
+            assert any("allowance does not cover another codex turn" in n for n in notes)
+            records = PoolStore(service.runtime).run_usage(joined["run_id"])
+            assert [(r["pool_id"], r["quantity"], r["quality"]) for r in records] == [("codex-turns", "1", "observed")]
+        finally:
+            service.close()
+
     def test_turn_budget_is_enforced(self, paths, tmp_path):
         from duet.runtime.policy import AuthorisationPolicy
 

@@ -22,10 +22,17 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+import time
+from decimal import Decimal
+
 from ..adapters import AgentError, AuthError, BillingError, QuotaError
 from ..providers.base import ProviderAdapter, TurnRequest, TurnResult
-from .contracts import CONTROLLER, TERMINAL_RUN, ActionState, Liveness, MessageKind, MessageState, RunLifecycle
+from .contracts import CONTROLLER, TERMINAL_RUN, ActionState, DomainError, Liveness, MessageKind, MessageState, PolicyDenied, RunLifecycle
 from .pairing import MAX_WAIT_SECONDS, PairCoordinator, other_provider
+from .pools import PoolStore
+
+TURN_METRIC = "turns"
+COST_METRIC = "cost.estimated_usd"
 
 log = logging.getLogger("duet.peers")
 
@@ -103,6 +110,11 @@ class ManagedPeer:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(registered["token"])
         self.session_id: str | None = None
+        self.pools = PoolStore(coordinator.runtime)
+        from ..usage.ledger import Ledger
+
+        self.ledger = Ledger()
+        self._cost_total: Decimal | None = Decimal(0)
         self.turns = 0
         self.results: list[TurnResult] = []
         self._stop = threading.Event()
@@ -181,12 +193,26 @@ class ManagedPeer:
             log.exception("managed %s peer failed", self.provider)
             self._give_up(f"driver error: {type(exc).__name__}: {exc}")
 
+    def _reservations(self) -> list[dict]:
+        """One turn against every local turns pool for this provider, and a
+        zero reservation against cost pools: that refuses a turn once the
+        cost pool is exhausted, but cannot stop one turn from overshooting
+        (estimates arrive with D08)."""
+        out = [{"provider": self.provider, "pool": p["pool_id"], "metric": TURN_METRIC, "quantity": 1, "category": "provider_turn"} for p in self.pools.pools_for(self.provider, TURN_METRIC)]
+        out += [{"provider": self.provider, "pool": p["pool_id"], "metric": COST_METRIC, "quantity": "0", "category": "provider_turn"} for p in self.pools.pools_for(self.provider, COST_METRIC)]
+        return out
+
     def _turn(self, messages: list[dict]) -> bool:
         runtime = self.co.runtime
-        planned = runtime.plan_action(
-            CONTROLLER, run_id=self.run_id, type="provider_turn", participant_id=self.participant_id,
-            input={"provider": self.provider, "turn": self.turns + 1, "messages": [m["message_id"] for m in messages], "resume": self.session_id},
-        )
+        try:
+            planned = runtime.plan_action(
+                CONTROLLER, run_id=self.run_id, type="provider_turn", participant_id=self.participant_id,
+                input={"provider": self.provider, "turn": self.turns + 1, "messages": [m["message_id"] for m in messages], "resume": self.session_id},
+                reservations=self._reservations(),
+            )
+        except PolicyDenied as exc:
+            self._give_up(f"the local usage allowance does not cover another {self.provider} turn: {exc.message}")
+            return False
         action_id = planned["action"]["action_id"]
         # The action lease must outlive the turn's own timeout.
         fence = runtime.claim_action(CONTROLLER, action_id, lease_seconds=int(self.turn_timeout) + 300)["lease"]["fencing_token"]
@@ -221,8 +247,9 @@ class ManagedPeer:
             raise
         self.results.append(result)
         outcome = ActionState.SUCCEEDED if result.ok else ActionState.FAILED
+        actuals = self._record_usage(action_id, result)
         runtime.record_action(
-            CONTROLLER, action_id, outcome, fence=fence, provider_invocation_id=result.provider_invocation_id,
+            CONTROLLER, action_id, outcome, fence=fence, provider_invocation_id=result.provider_invocation_id, actuals=actuals,
             result={
                 "status": result.status, "session_id": result.session_id, "lineage": result.lineage,
                 "settings": {"requested": result.settings.requested, "accepted": result.settings.accepted, "observed": result.settings.observed},
@@ -244,6 +271,46 @@ class ManagedPeer:
         # The turn's action is settled now; completion may have been waiting on it.
         self.co.try_complete(self.run_id)
         return True
+
+    def _record_usage(self, action_id: str, result: TurnResult) -> dict:
+        """Record this turn's usage in the matching pools, once per pool and
+        action. Cost goes through the usage ledger, so a resumed session's
+        cumulative figure becomes this turn's delta, or stays unknown."""
+        cost = self._turn_cost(action_id, result)
+        actuals: dict = {}
+        tx = self.co.runtime.store.read()
+        for row in tx.query("SELECT reservation_id, pool, metric FROM reservations WHERE action_id = ?", (action_id,)):
+            quantity = 1 if row["metric"] == TURN_METRIC else cost
+            quality = "observed" if row["metric"] == TURN_METRIC else ("estimated" if cost is not None else "unknown")
+            try:
+                self.pools.record_usage(
+                    CONTROLLER, record_id=f"{action_id}:{row['pool']}", pool_id=row["pool"], metric=row["metric"],
+                    quantity=None if quantity is None else str(quantity), quality=quality, source=f"{self.provider}.turn",
+                    run_id=self.run_id, action_id=action_id, participant_id=self.participant_id,
+                )
+            except DomainError:
+                log.exception("could not record usage for %s", row["pool"])
+            actuals[row["reservation_id"]] = {"quantity": None if quantity is None else str(quantity), "quality": quality}
+        return actuals
+
+    def _turn_cost(self, action_id: str, result: TurnResult) -> Decimal | None:
+        from ..usage.observations import ObservationError, from_turn_result
+
+        try:
+            observations = from_turn_result(result, provider=self.provider, turn_id=action_id, received_at_ms=int(time.time() * 1000), run_id=self.run_id)
+            self.ledger.ingest_all(observations)
+            if not result.session_id:
+                return None
+            metric = self.ledger.session_consumption(result.session_id).get(self.provider, COST_METRIC)
+        except (ObservationError, DomainError, ValueError) as exc:
+            log.warning("usage for %s could not be normalised: %s", action_id, exc)
+            self._cost_total = None
+            return None
+        total = None if metric is None else metric.value
+        previous, self._cost_total = self._cost_total, (Decimal(str(total)) if total is not None else None)
+        if previous is None or self._cost_total is None:
+            return None
+        return self._cost_total - previous
 
     def _last_sent_seq(self) -> int:
         value = self.co.runtime.store.read().scalar(

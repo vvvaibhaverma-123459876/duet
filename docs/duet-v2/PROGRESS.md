@@ -12,7 +12,8 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | D04 Provider adapters | done | see HANDOFF | `duet/providers` (+ legacy cumulative-cost fix) | 46 new tests; suite 491/1 skipped | pending (no Codex) | NOT_RUN (no Codex login; api.openai.com blocked) |
 | D05 MCP pair slice | done | see HANDOFF | `duet/runtime/{pairing,service,peers}.py`, `duet/integrations/mcp_server.py`, `duet/cli_v2.py`, instructions/skill | 48 new integration tests; suite 537/6 skipped (no SDK), 541/4 (mcp 2.2.0) | pending (no Codex) | NOT_RUN (peer-alpha **not** earned: no real pair run) |
 | D06 Task graph & scheduler | done | `619ca53` | `runtime/{taskplan,scheduler,taskgraph}.py`, migration 0004, 5 tools, evidence-only contributions; plus review fixes | 82 sim + 22 integration + 8 verification tests; suite 651/6 (core), 656/4 (mcp) | internal Claude review of D01–D05 done (findings fixed or in progress); Codex review pending | n/a |
-| D07–D14 | not started (D07 pure ledger in progress) | | | | | |
+| D07 Usage telemetry & ledger | done | see HANDOFF | `duet/usage` (observations, ledger), status-line parser, `runtime/pools.py`, migration 0005, `duet usage` | 71 ledger + 7 pool + integration tests | internal Claude review not yet run on D06/D07; Codex review pending | n/a |
+| D08–D14 | not started | | | | | |
 
 Independent review: Codex is not installed or authenticated in this
 environment, so no Claude–Codex review has taken place. Every milestone
