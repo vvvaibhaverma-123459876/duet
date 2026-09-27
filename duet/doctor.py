@@ -138,7 +138,7 @@ def _round_trip(agent_name: str, config: DuetConfig, prompt: str, expected: str)
     # Probe with a copy so the probe's throwaway session id, chaining state and
     # deadline never leak into the agent the session will actually use.
     probe = dataclasses.replace(
-        config.agents[agent_name], session_id="", last_session_id="", chain_sessions=False, deadline=None
+        config.agents[agent_name], session_id="", last_session_id="", chain_sessions=False, deadline=None, _session_cost_seen={}
     )
     try:
         with tempfile.TemporaryDirectory(prefix=f"duet-{agent_name}-doctor-") as tmp:

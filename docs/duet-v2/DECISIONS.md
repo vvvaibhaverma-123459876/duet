@@ -143,3 +143,20 @@ predicate evaluates all eight spec items. `finalize` exports the checkpoint as
 the report stands once exported, re-evaluates from the store, and only then
 moves the run to COMPLETED_VERIFIED. A contract with no required checks can
 never verify.
+
+## D-015: Provider paths (D04)
+
+- Managed Claude peers use `claude -p --output-format stream-json --verbose`
+  on the user's login. `--bare` is never used (it requires an API key, which
+  would be paid API billing). Permission profiles: `acceptEdits` for writers
+  and `dontAsk` for read-only reviewers, plus `--permission-prompts none` where
+  supported. There is no bypass mode in strict mode.
+- Managed Codex peers use `codex app-server` (stdio) with
+  `approvalPolicy: "never"` and a sandbox from the profile; approval and input
+  requests are declined. `codex exec --json` is an explicit, lower-capability
+  fallback.
+- Model and effort are validated before dispatch against what the provider
+  advertises (Claude help, Codex `model/list`). Unsupported values raise
+  `UnsupportedSetting`; they are never sent in the hope they work.
+- Cost observations carry their scope. Claude's resumed-session figure is
+  `session_cumulative`; the ledger (D07) derives deltas.

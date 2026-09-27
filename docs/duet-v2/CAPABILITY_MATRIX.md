@@ -19,7 +19,7 @@ compatibility.
 | Client | Version | How observed | Relevant capabilities | Not established |
 |---|---|---|---|---|
 | Claude Code | 2.1.283 | `claude --help` (fixture) | `-p`; `--output-format json\|stream-json`; `--input-format stream-json`; `--model`; `--effort low..max`; `--resume`; `--session-id`; `--fork-session`; `--mcp-config`; `--strict-mcp-config`; `--permission-mode`; `--allowed-tools`; `--max-budget-usd` (provider-enforced, `--print` only); `--no-session-persistence` | Authenticated output schema on this machine; whether effort/model are applied (observed settings); hook/status-line payloads |
-| Codex CLI | — | not installed | — | Everything, including the app-server schema, exec JSONL events, resume semantics and rate-limit reads |
+| Codex CLI | 0.157.1 | installed in the session scratchpad only; `--help`, generated app-server JSON schema, live unauthenticated handshake (fixtures) | app-server v2: initialize, model/list with per-model efforts, thread start/resume/fork, turn start/interrupt, token-usage and rate-limit notifications; exec `--json` events | Authenticated turns (no login, and the environment blocks api.openai.com): success-path events come from the schema, not live observation |
 | MCP Python SDK | 2.2.0 (PyPI) | package metadata | stdio server/client | Compatibility beyond the tested version |
 
 ## Requirements
@@ -33,12 +33,12 @@ compatibility.
 | R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
 | R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
 | R07 | Completion reserve | D08 | NOT_STARTED |
-| R08 | Supported controls only | D04, D09 | NOT_STARTED |
+| R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery from help/model catalogue; requested/accepted/observed recorded; unsupported rejected); routing: D09 |
 | R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM: legacy (D01) and v2 predicate with controller-only finalisation (D03); joint authorship: D10 |
 | R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; mutation invalidates); delta reviews and caching: D10 |
 | R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree leaves the user checkout byte-identical; one fenced writer; explicit checked imports); integration locking: D11 |
 | R12 | Recoverability | D02, D11 | TESTED_SIM (runtime: atomic transactions, IN_DOUBT reconciliation, no blind re-dispatch); full crash matrix: D11 |
-| R13 | No silent paid fallback | D04, D08 | LEGACY_PARTIAL (no fallback exists) |
+| R13 | No silent paid fallback | D04, D08 | TESTED_SIM (no `--bare`, no API-key paths, billing errors never retried as quota); admission: D08 |
 | R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2 NOT_STARTED |
 | R15 | Compatibility | D01, D13 | LEGACY_PARTIAL (documented outcome/exit-code change D-002; v1 transcript migration) |
 
@@ -62,7 +62,7 @@ compatibility.
 | AT14 | Mandatory action draws reserve once | D08 | | NOT_STARTED |
 | AT15 | Hard billing cap unavailable | D08 | | NOT_STARTED |
 | AT16 | Small security-sensitive patch | D09 | | NOT_STARTED |
-| AT17 | Unsupported effort / org clamp | D09 | | NOT_STARTED |
+| AT17 | Unsupported effort / org clamp | D09 | adapter-level rejection tests (D04) | PARTIAL: rejection TESTED_SIM; clamp detection needs live observation: NOT_RUN |
 | AT18 | User pins model/effort | D09/D12 | | NOT_STARTED |
 | AT19 | Missing dependency failure | D09 | | NOT_STARTED |
 | AT20 | Repeated no-progress repairs | D06/D09 | | NOT_STARTED |
@@ -76,18 +76,18 @@ compatibility.
 | AT28 | Concurrent writers | D11 | | NOT_STARTED |
 | AT29 | Crash around dispatch | D02/D11 | `test_crash_mid_transaction_leaves_no_partial_state`, `test_in_doubt_is_never_redispatched`, `test_reconcile_uses_process_identity_not_just_expiry` | TESTED_SIM (runtime); provider-level: D11 |
 | AT30 | Crash during commit/integration | D11 | | NOT_STARTED |
-| AT31 | Cancel while waiting/working/verifying | D04/D11 | `test_process.py` interrupt/timeout, `TestInterrupt`, battery `test_interrupt_leaves_a_resumable_manifest` | LEGACY: TESTED_SIM (working); waiting/verifying: v2 |
+| AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex) | TESTED_SIM (working); waiting/verifying across the runtime: D11 |
 | AT32 | PID reuse / unrelated sessions | D11 | | LEGACY_PARTIAL (`stop` confirms; name matching) |
 | AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval` | TESTED_SIM (runtime); end-to-end over MCP: D05/D13 |
-| AT34 | Malformed/flooded provider output | D04 | `test_process.py::test_flooding_child_is_bounded_at_capture`, `TestAdapter::test_json_output_over_the_cap_is_a_structured_failure` | LEGACY: TESTED_SIM; v2 streaming adapters: D04 |
+| AT34 | Malformed/flooded provider output | D04 | legacy `test_process.py`; v2 `test_flood_is_bounded`, `test_stream_process_truncates_long_lines`, malformed-line and server-death tests | TESTED_SIM |
 | AT35 | Unknown/failed/skipped required check | D03/D10 | `test_unknown_or_missing_required_check_blocks`, `test_no_tests_is_not_a_pass`, `test_contract_without_checks_can_never_verify` | TESTED_SIM |
 | AT36 | Inputs mutate during verification | D03 | `test_mutation_during_check_invalidates`, `test_transient_caches_do_not_invalidate` | TESTED_SIM |
 | AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
 | AT38 | Wheel without source tree | D13 | `test_packaging.py` | TESTED_SIM for defaults (migrations/skills added as they land) |
 | AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |
 | AT40 | Quota reset with stale telemetry | D08/D11 | | NOT_STARTED |
-| AT41 | Mid-turn setting change unsupported | D04/D09 | | NOT_STARTED |
-| AT42 | Resume/fork semantics differ | D04/D12 | | NOT_STARTED |
+| AT41 | Mid-turn setting change unsupported | D04/D09 | settings applied only at invocation (Claude) or `turn/start` (Codex); no steering-based switching | PARTIAL: adapters TESTED_SIM; routing boundary: D09 |
+| AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |
 | AT43 | No sandbox for borrowed session | D13 | | NOT_STARTED |
 | AT44 | Same snapshot checked twice | D10 | | NOT_STARTED |
 | AT45 | Native subagents spawn | D11 | | NOT_STARTED |

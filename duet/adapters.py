@@ -142,6 +142,12 @@ class CLIAgent:
     # Monotonic deadline set by the broker so a turn cannot outlive the
     # session's wallclock budget. None means only timeout_seconds applies.
     deadline: float | None = None
+    # "call": the reported cost is this invocation's own spend.
+    # "session_cumulative_on_resume": a resumed session reports the whole
+    # session's spend so far (Claude Code >= 2.1.277); the turn's own cost is
+    # the delta against the last value seen for that session, or unknown.
+    cost_json_scope: str = "call"
+    _session_cost_seen: dict = field(default_factory=dict, repr=False)
 
     def git_identity_env(self) -> dict[str, str]:
         """Attribute commits the agent makes itself to the agent, not to whoever
@@ -190,6 +196,7 @@ class CLIAgent:
         return timeout
 
     def send(self, prompt: str, workspace: Path) -> AgentResult:
+        resumed_from = self.session_id if (self.session_id and self.resume_command) else None
         cmd, stdin_data = self.build_command(prompt, workspace)
         env = None
         if self.extra_env:
@@ -232,6 +239,10 @@ class CLIAgent:
                 f"{self.name}: produced empty output. Command: {_redacted_cmd(cmd)}. stderr: {_tail(stderr)}",
                 kind="empty_output",
             )
+        if cost_usd is not None and self.cost_json_scope == "session_cumulative_on_resume":
+            cost_usd, problem = self._own_cost(cost_usd, resumed_from, session_id)
+            if problem:
+                warnings.append(problem)
         if proc.stdout_truncated:
             warnings.append(f"output exceeded {self.max_output_bytes} bytes and was truncated at capture")
         if proc.output_incomplete:
@@ -255,6 +266,25 @@ class CLIAgent:
             session_id=session_id,
             cost_usd=cost_usd,
         )
+
+    def _own_cost(self, reported: float, resumed_from: str | None, session_id: str | None) -> tuple[float | None, str]:
+        """Turn a session-cumulative figure into this call's own cost."""
+        problem = ""
+        if resumed_from is None:
+            own: float | None = reported  # a new session: everything so far is this call
+        elif resumed_from in self._session_cost_seen:
+            own = reported - self._session_cost_seen[resumed_from]
+            if own < 0:
+                own, problem = None, "session cost went backwards; this turn's cost is unknown"
+        else:
+            own = None
+            problem = (
+                f"resumed session {resumed_from} reports its cumulative spend (${reported:.4f}) and Duet has no "
+                "earlier figure for it; this turn's own cost is unknown"
+            )
+        if session_id:
+            self._session_cost_seen[session_id] = reported
+        return own, problem
 
     def _parse_output(self, stdout: str) -> tuple[str, str | None, float | None, list[str]]:
         if self.output_format == "text":

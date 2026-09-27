@@ -583,3 +583,43 @@ def test_pytest_with_no_tests_is_unknown_not_failed(tmp_path):
 
 def test_exit_codes_are_stable():
     assert [exit_code_for(o) for o in ("success", "halted", "unverified", "review_pending", "interrupted")] == [0, 2, 3, 4, 130]
+
+
+class TestResumedSessionCost:
+    """Claude Code reports a resumed session's cumulative spend; summing it
+    per turn double counts (found in the cost-tracking docs during D04)."""
+
+    def _agent(self, tmp_path, costs):
+        state = tmp_path / "n"
+        script = tmp_path / "cumulative.sh"
+        costs_list = " ".join(str(c) for c in costs)
+        script.write_text(
+            "#!/bin/bash\ncat > /dev/null\n"
+            f"n=$(cat {state} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {state}\n"
+            f"costs=({costs_list}); c=${{costs[$((n-1))]}}\n"
+            'echo "{\\"result\\":\\"ok\\",\\"session_id\\":\\"s1\\",\\"total_cost_usd\\":$c}"\n'
+        )
+        script.chmod(0o755)
+        return CLIAgent(
+            "claude", "Claude", [str(script)], "stdin", "", "json", 30, result_json_path="result",
+            session_json_path="session_id", cost_json_path="total_cost_usd", resume_command=[str(script), "{session_id}"],
+            chain_sessions=True, cost_json_scope="session_cumulative_on_resume",
+        )
+
+    def test_chained_turns_report_deltas(self, tmp_path):
+        agent = self._agent(tmp_path, [0.25, 0.60, 1.00])
+        costs = [agent.send("x", tmp_path).cost_usd for _ in range(3)]
+        assert costs == [pytest.approx(0.25), pytest.approx(0.35), pytest.approx(0.40)]
+
+    def test_attached_session_first_turn_is_unknown(self, tmp_path):
+        agent = self._agent(tmp_path, [5.00, 5.30])
+        agent.session_id = "s1"  # attached: spend from before Duet is unknown
+        first = agent.send("x", tmp_path)
+        assert first.cost_usd is None and "cumulative spend" in first.text
+        assert agent.send("x", tmp_path).cost_usd == pytest.approx(0.30)
+
+    def test_default_claude_config_uses_cumulative_scope(self):
+        from duet.config import default_config_text, parse_config
+
+        assert parse_config(default_config_text()).agents["claude"].cost_json_scope == "session_cumulative_on_resume"
+        assert parse_config(default_config_text()).agents["codex"].cost_json_scope == "call"

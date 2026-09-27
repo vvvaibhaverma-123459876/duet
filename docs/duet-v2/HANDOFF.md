@@ -4,7 +4,7 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D03** (see `D01_REPORT.md` to `D03_REPORT.md`).
+- Last completed milestone: **D04** (see `D01_REPORT.md` to `D04_REPORT.md`).
 - `feat/isolate-modes` is merged in (`9db29f3`).
 - Suite after D01: 291 passed, 1 skipped as root; 289 passed, 3 skipped as
   non-root. The non-root packaging tests skip because that user cannot read
@@ -23,12 +23,11 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-D04: `duet/providers`: a capability-oriented base contract; a Claude CLI
-adapter (stream-json, session start/resume, observed settings); a Codex
-app-server JSON-RPC client built against the schema generated from the
-installed CLI (`codex app-server generate-json-schema`; install
-`@openai/codex` locally, with no login needed for schema generation); the
-`codex exec --json` fallback; emulator fixtures; and the error taxonomy.
+D05: the runtime service (Unix socket, per-participant tokens), `duet mcp
+serve` (official MCP SDK, optional extra) exposing join, send, inbox, wait,
+propose_task, claim, submit, request_review, request_profile and status;
+packaged participant instructions; the two-way question test without user
+relay; and `duet pair` for DUET-launched managed pairs.
 
 ## Uncommitted files
 

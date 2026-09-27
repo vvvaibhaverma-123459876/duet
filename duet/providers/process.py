@@ -247,3 +247,164 @@ def _join(threads: list[threading.Thread], timeout: float) -> None:
     end = time.monotonic() + timeout
     for thread in threads:
         thread.join(timeout=max(0.0, end - time.monotonic()))
+
+
+@dataclass(frozen=True)
+class StreamResult:
+    returncode: int | None
+    stderr: str
+    timed_out: bool
+    cancelled: bool
+    lines: int
+    bytes_read: int
+    truncated_lines: int
+    over_limit: bool  # stopped dispatching lines after max_total_bytes
+    duration_s: float
+
+
+def stream_process(
+    cmd: list[str],
+    *,
+    on_line,
+    cwd: Path | str | None = None,
+    env: dict[str, str] | None = None,
+    stdin_data: str | None = None,
+    timeout: float | None = None,
+    cancel_event: threading.Event | None = None,
+    max_line_bytes: int = 4 * 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024,
+    max_stderr: int = DEFAULT_MAX_STDERR,
+    interrupt_first: bool = False,
+    term_grace: float = TERM_GRACE_SECONDS,
+) -> StreamResult:
+    """Run `cmd` and hand each stdout line to `on_line` as it arrives, in the
+    caller's thread. Lines longer than `max_line_bytes` are truncated (and
+    counted); after `max_total_bytes` lines stop being dispatched but output
+    is still drained so the child cannot block on a full pipe.
+
+    On timeout or cancellation the child's process group gets SIGINT first
+    when `interrupt_first` (CLIs such as Claude Code end the current turn
+    cleanly on SIGINT and still emit a final result), then SIGTERM/SIGKILL.
+    Lines that arrive during that grace period are still dispatched."""
+    import queue
+
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        start_new_session=(os.name != "nt"),
+    )
+    lines: "queue.Queue[tuple[bytes, bool] | None]" = queue.Queue(maxsize=1024)
+    counters = {"bytes": 0, "truncated": 0}
+    err_buf = BoundedBuffer(max_stderr)
+
+    def read_lines() -> None:
+        pending = bytearray()
+        overflowing = False
+        try:
+            while True:
+                chunk = proc.stdout.read(CHUNK)
+                if not chunk:
+                    break
+                counters["bytes"] += len(chunk)
+                start = 0
+                while True:
+                    newline = chunk.find(b"\n", start)
+                    piece = chunk[start:] if newline < 0 else chunk[start:newline]
+                    if not overflowing:
+                        room = max_line_bytes - len(pending)
+                        if len(piece) > room:
+                            pending += piece[:room]
+                            overflowing = True
+                        else:
+                            pending += piece
+                    if newline < 0:
+                        break
+                    lines.put((bytes(pending), overflowing))
+                    if overflowing:
+                        counters["truncated"] += 1
+                    pending = bytearray()
+                    overflowing = False
+                    start = newline + 1
+        except (OSError, ValueError):
+            pass
+        finally:
+            if pending:
+                lines.put((bytes(pending), overflowing))
+                if overflowing:
+                    counters["truncated"] += 1
+            lines.put(None)
+
+    reader = threading.Thread(target=read_lines, daemon=True)
+    err_reader = threading.Thread(target=_pump, args=(proc.stderr, err_buf), daemon=True)
+    reader.start()
+    err_reader.start()
+    if stdin_data is not None:
+        threading.Thread(target=_feed_stdin, args=(proc.stdin, stdin_data), daemon=True).start()
+
+    deadline = None if timeout is None else started + max(timeout, 0.0)
+    timed_out = cancelled = over_limit = False
+    stop_requested_at: float | None = None
+    dispatched_bytes = 0
+    count = 0
+    eof = False
+    try:
+        while not eof:
+            now = time.monotonic()
+            if stop_requested_at is None:
+                if deadline is not None and now >= deadline:
+                    timed_out = True
+                elif cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                if timed_out or cancelled:
+                    stop_requested_at = now
+                    if interrupt_first:
+                        _kill_group(proc.pid, signal.SIGINT)
+                    else:
+                        terminate_tree(proc, grace=term_grace)
+            elif interrupt_first and now - stop_requested_at > term_grace and proc.poll() is None:
+                terminate_tree(proc, grace=term_grace)
+            try:
+                item = lines.get(timeout=0.1)
+            except queue.Empty:
+                if proc.poll() is not None and not reader.is_alive():
+                    break
+                continue
+            if item is None:
+                eof = True
+                break
+            raw, _ = item
+            dispatched_bytes += len(raw) + 1
+            if dispatched_bytes > max_total_bytes:
+                over_limit = True
+                continue
+            count += 1
+            on_line(raw.decode("utf-8", errors="replace"))
+    except BaseException:
+        terminate_tree(proc, grace=term_grace)
+        raise
+    try:
+        proc.wait(timeout=term_grace * 2 if stop_requested_at is not None else 30)
+    except subprocess.TimeoutExpired:
+        terminate_tree(proc, grace=term_grace)
+    if proc.poll() is None:  # pragma: no cover - defensive
+        terminate_tree(proc, grace=term_grace)
+    # Anything still in the group after the leader exited is ours.
+    _kill_group(proc.pid, signal.SIGKILL)
+    err_reader.join(timeout=1.0)
+    return StreamResult(
+        returncode=proc.returncode,
+        stderr=err_buf.text(),
+        timed_out=timed_out,
+        cancelled=cancelled,
+        lines=count,
+        bytes_read=counters["bytes"],
+        truncated_lines=counters["truncated"],
+        over_limit=over_limit,
+        duration_s=time.monotonic() - started,
+    )

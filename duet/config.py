@@ -161,6 +161,9 @@ def _build_agent(name: str, item: dict, label: str) -> CLIAgent:
             raise ConfigError(f"agent '{name}': resume_command must be a string list")
         if not any(SESSION_ID_PLACEHOLDER in part for part in resume_command):
             raise ConfigError(f"agent '{name}': resume_command must contain the {SESSION_ID_PLACEHOLDER!r} placeholder")
+    cost_json_scope = _string(item, "cost_json_scope", "call", where)
+    if cost_json_scope not in ("call", "session_cumulative_on_resume"):
+        raise ConfigError(f"agent '{name}': cost_json_scope must be 'call' or 'session_cumulative_on_resume'")
     quota_markers = item.get("quota_markers", [])
     if not isinstance(quota_markers, list) or not all(isinstance(m, str) and m for m in quota_markers):
         raise ConfigError(f"agent '{name}': quota_markers must be a list of non-empty strings")
@@ -179,6 +182,7 @@ def _build_agent(name: str, item: dict, label: str) -> CLIAgent:
         resume_command=list(resume_command),
         chain_sessions=bool(item.get("chain_sessions", False)),
         cost_json_path=_string(item, "cost_json_path", "", where),
+        cost_json_scope=cost_json_scope,
         quota_markers=list(quota_markers) or list(DEFAULT_QUOTA_MARKERS),
         max_output_bytes=max_output_bytes,
         max_stderr_bytes=max_stderr_bytes,

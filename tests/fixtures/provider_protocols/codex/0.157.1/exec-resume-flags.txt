@@ -1,0 +1,20 @@
+  -c, --config <key=value>
+      --last
+      --all
+      --enable <FEATURE>
+      --disable <FEATURE>
+  -i, --image <FILE>
+      --strict-config
+  -m, --model <MODEL>
+      --dangerously-bypass-approvals-and-sandbox
+      --dangerously-bypass-hook-trust
+      --worktree
+      --thread-source <SOURCE>
+      --skip-git-repo-check
+      --ephemeral
+      --ignore-user-config
+      --ignore-rules
+      --output-schema <FILE>
+      --json
+  -o, --output-last-message <FILE>
+  -h, --help

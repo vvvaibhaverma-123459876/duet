@@ -120,3 +120,15 @@ specification's findings, re-checked against source):
 Test gaps: nothing checks outcome honesty under unknown verification, budget
 versus verification ordering, solo-mode review obligations, cost
 unknown-ness, bounded capture, wheel packaging, or running as root.
+
+## Addendum (D04): provider reachability in this environment
+
+- Codex CLI 0.157.1 was installed into the session scratchpad (not the
+  repository and not globally) to generate its protocol schema and record an
+  unauthenticated handshake. No login was performed.
+- The environment's egress proxy refuses `api.openai.com` (HTTP 403 on
+  CONNECT) and `developers.openai.com`. A real Codex turn is impossible here
+  regardless of authentication.
+- An authenticated Claude turn was not attempted: it would consume the user's
+  plan, and the specification requires an explicit local gate
+  (`DUET_REAL_PROVIDERS=1`).
