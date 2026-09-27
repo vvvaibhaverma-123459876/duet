@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, cli_v2
 from .adapters import AgentError
 from .broker import exit_code_for, run_session
 from .prompting import default_roles, demo_roles
@@ -264,6 +264,9 @@ def main(argv: list[str] | None = None) -> int:
     replay = sub.add_parser("replay")
     replay.add_argument("transcript_json")
 
+    cli_v2.add_parsers(sub)
+    cli_v2.extend_legacy(status, stop)
+
     init = sub.add_parser("init")
     scope = init.add_mutually_exclusive_group()
     scope.add_argument("--user", action="store_true")
@@ -277,6 +280,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     configure_logging(args.log_level, args.log_file)
+    if cli_v2.handles(args):
+        return cli_v2.dispatch(args)
     _install_signal_handlers()
 
     if args.command == "init":

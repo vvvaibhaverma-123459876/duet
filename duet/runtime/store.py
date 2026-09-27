@@ -103,7 +103,8 @@ class Store:
 
     def __init__(self, path: Path | str, *, allow_network_fs: bool = False) -> None:
         self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Private from the start: tokens' hashes and run state live here.
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         kind = filesystem_kind(self.path.parent)
         if kind.startswith("network:") and not allow_network_fs:
             raise SchemaError(

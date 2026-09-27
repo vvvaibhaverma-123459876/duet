@@ -26,9 +26,9 @@ compatibility.
 
 | ID | Requirement | Milestones | Status |
 |---|---|---|---|
-| R01 | Partnership with evidenced contributions | D05, D06, D10 | LEGACY_PARTIAL (v1 requires "spoke", not substantive) |
-| R02 | Original-session continuity | D05, D12 | NOT_STARTED (v1 `--attach` resumes, which may fork) |
-| R03 | Two-way initiative | D05 | NOT_STARTED |
+| R01 | Partnership with evidenced contributions | D05, D06, D10 | TESTED_SIM (pair runs need a registered Claude and Codex; completion requires authored snapshot + cross-provider review; peer loss holds completion); substantive-contribution scheduling: D06 |
+| R02 | Original-session continuity | D05, D12 | TESTED_SIM (native session stays the participant: rejoin is idempotent, restart reconnects via host identity, a dead host becomes `gone` and its token stops working); LIVE: NOT_RUN |
+| R03 | Two-way initiative | D05 | TESTED_SIM (either side asks at any time; non-blocking send; waits wake on questions) — real models: NOT_RUN |
 | R04 | One objective/contract | D02, D06 | TESTED_SIM (runtime: one run, versioned acceptance contract, user-only changes); scheduler: D06 |
 | R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
 | R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
@@ -46,11 +46,11 @@ compatibility.
 
 | ID | Scenario | Milestone | Test(s) | Status |
 |---|---|---|---|---|
-| AT01 | Launch from existing Claude | D05 | | NOT_STARTED |
-| AT02 | Launch from existing Codex | D05 | | NOT_STARTED |
-| AT03 | DUET launches both managed | D05 | | NOT_STARTED |
-| AT04 | Both ask while waiting | D05 | `TestMessaging::test_bidirectional_questions_do_not_block` (store level) | PARTIAL: runtime semantics TESTED_SIM; wait/wake over MCP: D05 |
-| AT05 | Redelivery/reconnect | D02/D05 | `test_runtime_api.py::TestMessaging::test_redelivery_until_acknowledged`, idempotent send | TESTED_SIM (store level); reconnect over the endpoint: D05 |
+| AT01 | Launch from existing Claude | D05 | simulated: `test_native_claude_and_managed_codex_talk_both_ways_and_ship_a_reviewed_patch` (service), `test_native_claude_and_native_codex_pair_over_mcp` (real MCP proxies); procedure: `PEER_ALPHA_TEST.md` | TESTED_SIM; LIVE: NOT_RUN |
+| AT02 | Launch from existing Codex | D05 | simulated: `test_native_codex_initiates_and_answers_a_claude_follow_up` (native Codex starts the run, managed Claude asks back, the original Codex answers), `test_invite_is_single_use_and_provider_bound`; procedure: `PEER_ALPHA_TEST.md` | TESTED_SIM; LIVE: NOT_RUN |
+| AT03 | DUET launches both managed | D05 | `test_duet_pair_with_emulated_managed_sessions` (CLI → service → real adapters → emulated provider processes → `duet mcp serve`), `test_duet_originated_pair_is_labelled_managed`; gated real: `tests/e2e_peer/test_real_pair.py` | TESTED_SIM; LIVE: NOT_RUN |
+| AT04 | Both ask while waiting | D05 | `test_a_asks_b_b_asks_a_a_answers_b_continues`, `test_simultaneous_questions_do_not_deadlock`, `test_waits_are_served_concurrently`, MCP pair test (wait already blocked when the question arrives) | TESTED_SIM |
+| AT05 | Redelivery/reconnect | D02/D05 | `test_redelivery_until_acknowledged`, `test_unacknowledged_messages_are_redelivered_after_reconnect`, `test_proxy_restart_reconnects_the_same_session` (MCP), `test_restart_settles_interrupted_checks` | TESTED_SIM |
 | AT06 | Live delivery unsupported | D12 | | NOT_STARTED |
 | AT07 | Peer quota before mandatory review | D08 | | NOT_STARTED |
 | AT08 | Unknown usage | D07 | | NOT_STARTED |
@@ -76,14 +76,14 @@ compatibility.
 | AT28 | Concurrent writers | D11 | | NOT_STARTED |
 | AT29 | Crash around dispatch | D02/D11 | `test_crash_mid_transaction_leaves_no_partial_state`, `test_in_doubt_is_never_redispatched`, `test_reconcile_uses_process_identity_not_just_expiry` | TESTED_SIM (runtime); provider-level: D11 |
 | AT30 | Crash during commit/integration | D11 | | NOT_STARTED |
-| AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex) | TESTED_SIM (working); waiting/verifying across the runtime: D11 |
+| AT31 | Cancel while waiting/working/verifying | D04/D11 | legacy interrupt tests; v2 `test_cancel_interrupts_the_turn` (Claude SIGINT), `test_cancel_uses_turn_interrupt` (Codex), `test_cancel_while_waiting` (pair wait wakes with CANCELLED) | TESTED_SIM (waiting, working); verifying across a crash: D11 |
 | AT32 | PID reuse / unrelated sessions | D11 | | LEGACY_PARTIAL (`stop` confirms; name matching) |
-| AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval` | TESTED_SIM (runtime); end-to-end over MCP: D05/D13 |
+| AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval`, `test_message_text_carries_no_authority`, `test_authentication_rules` (identity never a parameter) | TESTED_SIM (runtime + service); installer threat model: D13 |
 | AT34 | Malformed/flooded provider output | D04 | legacy `test_process.py`; v2 `test_flood_is_bounded`, `test_stream_process_truncates_long_lines`, malformed-line and server-death tests | TESTED_SIM |
 | AT35 | Unknown/failed/skipped required check | D03/D10 | `test_unknown_or_missing_required_check_blocks`, `test_no_tests_is_not_a_pass`, `test_contract_without_checks_can_never_verify` | TESTED_SIM |
 | AT36 | Inputs mutate during verification | D03 | `test_mutation_during_check_invalidates`, `test_transient_caches_do_not_invalidate` | TESTED_SIM |
 | AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
-| AT38 | Wheel without source tree | D13 | `test_packaging.py` | TESTED_SIM for defaults (migrations/skills added as they land) |
+| AT38 | Wheel without source tree | D13 | `test_packaging.py` (defaults, migrations 0001–0003, participant instructions, Claude skill) | TESTED_SIM |
 | AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |
 | AT40 | Quota reset with stale telemetry | D08/D11 | | NOT_STARTED |
 | AT41 | Mid-turn setting change unsupported | D04/D09 | settings applied only at invocation (Claude) or `turn/start` (Codex); no steering-based switching | PARTIAL: adapters TESTED_SIM; routing boundary: D09 |

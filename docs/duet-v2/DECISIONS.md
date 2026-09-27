@@ -160,3 +160,68 @@ never verify.
   `UnsupportedSetting`; they are never sent in the hope they work.
 - Cost observations carry their scope. Claude's resumed-session figure is
   `session_cumulative`; the ledger (D07) derives deltas.
+
+## D-016: MCP SDK (D05)
+
+`duet mcp serve` uses the official MCP Python SDK (`mcp`) behind an optional
+extra: `pip install 'duet[mcp]'`, pinned `mcp>=2.2,<3` and tested with 2.2.0.
+The 2.x API (`mcp.server.mcpserver.MCPServer`) replaces 1.x `FastMCP`, hence
+the major-version cap. The core imports nothing from the SDK, and the CI root
+job runs without it. A legacy `initialize` handshake (what Claude Code and
+Codex send) was checked against the server directly.
+
+## D-017: Local runtime service (D05)
+
+- One service per state directory (exclusive `flock`), started on demand by
+  the first MCP proxy or CLI (spawn lock). The MCP proxy never opens the
+  database itself: one scheduler, one state store.
+- Transport: a Unix-domain socket, 0600, in a 0700 directory, with a short
+  fallback path when the state path exceeds `sun_path`. The connecting uid is
+  checked with SO_PEERCRED on Linux. Each connection carries one
+  newline-delimited JSON request, at most 1 MiB. There is no network listener
+  and no browser-reachable API.
+- Authentication: a participant bearer token (hash stored) or the per-start
+  service secret (0600 file) for the user's CLI. Unauthenticated callers may
+  only `ping` and `join`. Identity, recipients and workspace always come from
+  the token, and unknown arguments are rejected.
+- Same-user processes can read the secret and reach the socket. This is
+  isolation from other users and from accidents, labelled
+  `containment=cooperative`; it is not a sandbox.
+
+## D-018: Delivery, identity and turn rules (D05)
+
+- Native sessions: `receive=checkpoint`, `native_identity=connection_bound`.
+  The claimed host (the agent CLI that launched the proxy) must be a live
+  ancestor of the connecting process (Linux). A host that exits makes the
+  participant `gone`, and its token stops working: a later resume is a
+  different session (R02).
+- Managed sessions: `receive=push` (a turn starts when an actionable message
+  arrives), `native_identity=verified` (session or thread id observed), Codex
+  `containment=unverified`.
+- `send` never waits. `wait` is bounded (≤ 50 s, below Codex's default MCP
+  tool timeout) and wakes for any new message, run or peer change, or
+  cancellation. Delivery is at least once: the proxy's watermark resets to
+  the durable cursor on restart.
+- A managed turn starts only for peer questions, answers, review requests,
+  findings, proposals, blockers, or a controller BLOCKER. Informational
+  notices ride along with the next turn.
+- The fallback answer (the turn's final text, labelled) is sent only when the
+  managed peer sent nothing at all during a turn that carried a question.
+
+## D-019: Vertical-slice run shape (D05)
+
+- One writer per run (`self` or `peer`, fixed at creation), holding the
+  fenced workspace lease. The reviewer reads a read-only materialised
+  snapshot. The review request carries a diff built from that snapshot,
+  never from the live workspace.
+- The initiating native session proposes the checks (argv only, never a
+  shell). At least one check is required, since nothing else can verify
+  completion. Only the user changes the contract afterwards.
+- Checks run as durable `check` actions. A check interrupted by a service
+  crash is settled FAILED at restart (read-only and repeatable); an
+  interrupted provider turn stays IN_DOUBT.
+- On COMPLETED_VERIFIED the snapshot's recorded paths (never excluded
+  secrets) are committed to the DUET-owned branch. Nothing is pushed or
+  merged.
+- Overdue runs pause (`PAUSED_BUDGET`) and their managed peers stop. A paused
+  run does not keep the service alive.

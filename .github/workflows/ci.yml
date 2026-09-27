@@ -17,11 +17,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install
-        run: pip install -e ".[test]"
-      - name: Unit, hermetic e2e battery, and wheel packaging
+      - name: Install (with the optional MCP SDK)
+        run: pip install -e ".[test,mcp]"
+      - name: Unit, hermetic e2e battery, MCP integration, and wheel packaging
         # The battery drives the real duet CLI against fake agent binaries,
         # so it runs fully offline; the DUET_E2E-gated real-CLI test skips.
+        # tests/integrations drive `duet mcp serve` and `duet pair` against
+        # provider emulators; real-provider tests stay gated and skip.
         # tests/test_packaging.py builds a wheel and runs it outside the tree.
         run: pytest -q
 
@@ -32,7 +34,7 @@ jobs:
     container: python:3.11
     steps:
       - uses: actions/checkout@v4
-      - name: Install
+      - name: Install (core only: MCP tests skip, proving the core needs no SDK)
         run: pip install -e ".[test]"
       - name: Suite as root
         run: |

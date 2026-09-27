@@ -196,16 +196,21 @@ class CodexAppServerAdapter:
             raise UnsupportedSetting("codex app-server assigns thread ids itself")
         if request.max_budget_usd is not None:
             raise UnsupportedSetting("codex enforces no per-call spend cap")
-        if request.mcp_config is not None:
-            raise UnsupportedSetting("per-turn MCP config is set through codex config, not turn/start")
-        self.check_settings(request.model, request.effort)
+        thread_config = codex_mcp_config(request.mcp_config) if request.mcp_config is not None else None
         accepted: dict = {}
+        self.check_settings(request.model, request.effort)
         started = time.monotonic()
         rpc = self.rpc
         sandbox = SANDBOX_FOR_PROFILE[request.permission_profile]
         common = {"cwd": str(request.cwd), "approvalPolicy": "never", "sandbox": sandbox}
         if request.extra_instructions:
             common["developerInstructions"] = request.extra_instructions
+        if thread_config is not None:
+            # Observed on 0.157.1: thread/start|resume|fork `config.mcp_servers`
+            # launches the server for that thread (with its `env`). Unknown keys
+            # are accepted silently, so acceptance is not proof of effect.
+            common["config"] = thread_config
+            accepted["mcp_servers"] = sorted(thread_config["mcp_servers"])
         try:
             if request.session_id and request.fork:
                 opened = rpc.request("thread/fork", {"threadId": request.session_id, **common}, timeout=self.request_timeout)
@@ -399,3 +404,23 @@ def _rate_limit_observations(snapshot: dict, source: str, at_ms: int | None = No
 
 
 __all__ = ["CodexAppServerAdapter"]
+
+
+def codex_mcp_config(mcp_config: dict) -> dict:
+    """Translate the Claude-style `{"mcpServers": {name: {command, args, env}}}`
+    shape into Codex thread config. Only stdio servers are passed through."""
+    servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
+    if not isinstance(servers, dict) or not servers:
+        raise UnsupportedSetting("mcp_config needs an mcpServers table with at least one stdio server")
+    out: dict = {}
+    for name, spec in servers.items():
+        if not isinstance(spec, dict) or not isinstance(spec.get("command"), str):
+            raise UnsupportedSetting(f"MCP server {name!r} needs a command (only stdio servers are supported)")
+        entry: dict = {"command": spec["command"], "args": [str(a) for a in spec.get("args", [])]}
+        if spec.get("env"):
+            entry["env"] = {str(k): str(v) for k, v in spec["env"].items()}
+        for key in ("tool_timeout_sec", "startup_timeout_sec"):
+            if key in spec:
+                entry[key] = spec[key]
+        out[name] = entry
+    return {"mcp_servers": out}

@@ -249,6 +249,18 @@ class TestCodexAppServer:
         finally:
             adapter.close()
 
+    def test_mcp_config_goes_to_thread_config(self, codex, tmp_path):
+        mcp = {"mcpServers": {"duet": {"command": "python3", "args": ["-m", "duet", "mcp", "serve"], "env": {"DUET_STATE_DIR": "/s"}, "tool_timeout_sec": 180}}}
+        result = codex.run_turn(req(tmp_path, mcp_config=mcp))
+        assert result.ok and result.settings.accepted["mcp_servers"] == ["duet"]
+        starts = [json.loads(l)["recv"] for l in (tmp_path / "codex.log").read_text().splitlines() if '"thread/start"' in l]
+        config = starts[0]["params"]["config"]["mcp_servers"]["duet"]
+        assert config == {"command": "python3", "args": ["-m", "duet", "mcp", "serve"], "env": {"DUET_STATE_DIR": "/s"}, "tool_timeout_sec": 180}
+
+    def test_mcp_config_needs_a_stdio_server(self, codex, tmp_path):
+        with pytest.raises(UnsupportedSetting):
+            codex.run_turn(req(tmp_path, mcp_config={"mcpServers": {"x": {"url": "http://127.0.0.1:1"}}}))
+
     def test_cancel_uses_turn_interrupt(self, tmp_path, monkeypatch):  # AT31
         monkeypatch.setenv("FAKE_CODEX_MODE", "hang")
         adapter = CodexAppServerAdapter(shim(tmp_path, "codex", "fake_codex_appserver.py"))

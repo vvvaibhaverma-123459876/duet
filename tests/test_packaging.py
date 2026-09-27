@@ -47,7 +47,12 @@ def test_wheel_contains_packaged_defaults(tmp_path):
     wheel = _build_wheel(tmp_path)
     names = zipfile.ZipFile(wheel).namelist()
     assert "duet/resources/default_config.toml" in names
-    assert any(n.startswith("duet/runtime/migrations/") and n.endswith(".sql") for n in names)
+    for migration in ("0001_initial.sql", "0002_evidence.sql", "0003_pairing.sql"):
+        assert f"duet/runtime/migrations/{migration}" in names
+    # D05: packaged participant instructions and the Claude Code skill.
+    assert "duet/resources/instructions/participant.md" in names
+    assert "duet/resources/instructions/codex-agents.md" in names
+    assert "duet/resources/skills/duet-pair/SKILL.md" in names
 
 
 def test_installed_wheel_runs_without_source_tree(tmp_path):
@@ -68,3 +73,6 @@ def test_installed_wheel_runs_without_source_tree(tmp_path):
     code = "from duet.runtime.store import Store; import sys; print(Store(sys.argv[1]).schema_version())"
     proc = subprocess.run([str(python), "-c", code, str(tmp_path / "rt.db")], cwd=work, env=env, capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0 and int(proc.stdout.strip()) >= 1, proc.stderr
+    code = "from duet.runtime.peers import participant_instructions; print(participant_instructions().splitlines()[0])"
+    proc = subprocess.run([str(python), "-c", code], cwd=work, env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0 and proc.stdout.strip() == "# Working with a DUET peer", proc.stderr

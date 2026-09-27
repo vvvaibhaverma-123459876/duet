@@ -94,7 +94,12 @@ class ProcessIdentity:
 
     @classmethod
     def current(cls) -> "ProcessIdentity":
-        pid = os.getpid()
+        return cls.of(os.getpid())
+
+    @classmethod
+    def of(cls, pid: int) -> "ProcessIdentity":
+        """Identity of another local process (e.g. the agent CLI hosting an
+        MCP server). The start time distinguishes a reused pid."""
         return cls(socket.gethostname(), boot_id(), pid, process_start(pid) or "unknown")
 
     def is_alive(self) -> bool:

@@ -118,6 +118,11 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
         "checkpoint_id",
         ("checkpoint_id", "run_id", "snapshot_id", "acceptance_hash", "report_hash", "artifact_ref", "created_at"),
     ),
+    # D05: pairing invitations (migration 0003)
+    "invites": (
+        "invite_id",
+        ("invite_id", "run_id", "provider", "code_hash", "created_by", "expires_at", "used_by", "used_at", "created_at"),
+    ),
 }
 REPLAYED_TABLES = tuple(TABLES)
 
@@ -755,6 +760,37 @@ def _checkpoint_exported(p: dict, e: Event, get: Getter) -> list[Upsert]:
     ]
 
 
+def _invite_created(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if get("invites", p["invite_id"]) is not None:
+        raise InvalidTransition(f"invite {p['invite_id']} already exists")
+    return [
+        (
+            "invites",
+            {
+                "invite_id": p["invite_id"],
+                "run_id": p["run_id"],
+                "provider": p["provider"],
+                "code_hash": p["code_hash"],
+                "created_by": p["created_by"],
+                "expires_at": p["expires_at"],
+                "used_by": None,
+                "used_at": None,
+                "created_at": e.at,
+            },
+        )
+    ]
+
+
+def _invite_used(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "invites", p["invite_id"])
+    if row["used_by"] is not None:
+        raise InvalidTransition(f"invite {p['invite_id']} was already used")
+    _require(get, "participants", p["participant_id"])
+    row.update(used_by=p["participant_id"], used_at=e.at)
+    return [("invites", row)]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -785,6 +821,8 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "review.submitted": _review_submitted,
     "finding.resolved": _finding_resolved,
     "checkpoint.exported": _checkpoint_exported,
+    "invite.created": _invite_created,
+    "invite.used": _invite_used,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

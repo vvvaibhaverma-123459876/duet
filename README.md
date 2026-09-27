@@ -182,6 +182,46 @@ lock and its own `duet/session-*` branch, so concurrent sessions on different
 repos (or worktrees of one repo) do not interfere. Duet does not open terminal
 windows for you; run each session in its own terminal or under `tmux`.
 
+## Peer pairing (v2, early)
+
+The v2 runtime pairs a Claude session and a Codex session as peers. Either
+one can ask the other a question at any time, and neither waits on its own
+question. DUET, not the agents, decides completion: it runs the checks on
+the exact submitted snapshot and requires a review by the other provider.
+
+**Status:** tested against protocol emulators only. No real Claude–Codex
+pair has run yet, so this is not "peer alpha". See
+`docs/duet-v2/D05_REPORT.md` and `docs/duet-v2/PEER_ALPHA_TEST.md`.
+
+From your own Claude Code or Codex session (the session stays a participant):
+
+```bash
+pip install 'duet[mcp]'
+claude mcp add duet -- duet mcp serve
+codex mcp add duet -- duet mcp serve
+```
+
+Then ask the session to "use DUET to pair with Codex (or Claude) on <task>,
+checked by `<test command>`". It calls `duet_join` and the other `duet_*`
+tools. With `peer="managed"` DUET starts the other agent. With
+`peer="invite"` you pass an invite to your other session once, and you never
+relay messages after that. From inside a session, never run `duet pair`: it
+starts two new managed agents instead of using the session you are in.
+
+From a terminal, with both sessions launched and labelled `managed` by DUET:
+
+```bash
+duet pair "add mul(a, b) to calc.py" --check "python check_feature.py"
+duet status --run RUN_ID [--json]
+duet stop --run RUN_ID
+duet service status | stop
+```
+
+Work happens in a DUET worktree on a `duet/run-...` branch; your checkout is
+never touched. A verified change is committed to that branch. Nothing is
+pushed or merged. Runs use your existing CLI logins: no API keys, no paid
+fallback. Model and effort are fixed in this version.
+
 ## Verification gates
 
 `--verify` accepts `pytest`, `none`, or `cmd:<shell command>`, and can be

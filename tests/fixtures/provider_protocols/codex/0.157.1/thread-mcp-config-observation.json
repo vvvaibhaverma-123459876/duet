@@ -1,0 +1,16 @@
+{
+  "observed_with": "codex-cli 0.157.1 app-server, empty CODEX_HOME, no login, no network access needed",
+  "date": "2026-09-27",
+  "method": "thread/start",
+  "params_shapes_tried": {
+    "nested": {"config": {"mcp_servers": {"duet": {"command": "<marker script>", "args": ["--probe"], "env": {"DUET_PROBE": "yes"}, "tool_timeout_sec": 180, "startup_timeout_sec": 20}}}},
+    "dotted": {"config": {"mcp_servers.duet.command": "<marker script>", "mcp_servers.duet.args": ["--probe"]}}
+  },
+  "results": {
+    "nested": "thread created; the MCP server process was started with args=--probe and received env DUET_PROBE=yes",
+    "dotted": "thread created; the MCP server process was started with args=--probe",
+    "unknown_server_key": "thread/start with mcp_servers.duet.bogus_key=1 still succeeded: unknown keys are accepted silently, so acceptance of tool_timeout_sec does not prove it takes effect",
+    "mcpServerStatus/list": "returned {\"data\": []} for thread-level servers: it does not reflect per-thread config"
+  },
+  "schema_note": "ThreadStartParams, ThreadResumeParams and ThreadForkParams all declare `config` (object, additionalProperties: true)"
+}

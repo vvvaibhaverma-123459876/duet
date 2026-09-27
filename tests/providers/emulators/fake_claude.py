@@ -73,6 +73,18 @@ if MODE in ("auth", "rate_limit", "billing", "model"):
 if MODE == "no_result":
     sys.exit(1)
 
+if MODE == "peer":
+    # Act through the DUET MCP server named in --mcp-config (see agent_brain.py).
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import agent_brain
+
+    config = json.loads(opt("--mcp-config") or "{}")
+    text = agent_brain.act(prompt, (config.get("mcpServers") or {}).get("duet"))
+    emit({"type": "assistant", "parent_tool_use_id": None, "message": {"id": "msg_1", "content": [{"type": "text", "text": text}], "usage": {"input_tokens": 10, "output_tokens": 1}}})
+    emit({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "duration_ms": 12, "result": text,
+          "total_cost_usd": 0.01, "usage": {"input_tokens": 10, "output_tokens": 1}})
+    sys.exit(0)
+
 emit({"type": "assistant", "parent_tool_use_id": None, "message": {"id": "msg_1", "content": [{"type": "text", "text": f"Working on: {prompt[:30]}"}], "usage": {"input_tokens": 10, "output_tokens": 1}}})
 
 if MODE == "crash_zero":

@@ -13,6 +13,9 @@ dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]
+# Official MCP Python SDK for `duet mcp serve` (DECISIONS.md D-016). Tested
+# with 2.2.0; the 2.x API (MCPServer) differs from 1.x (FastMCP).
+mcp = ["mcp>=2.2,<3"]
 
 [project.scripts]
 duet = "duet.cli:main"

@@ -171,15 +171,18 @@ class ClaudeCLIAdapter:
             accepted["effort"] = request.effort
         if request.permission_profile == "read_only":
             # dontAsk: reads within the working dirs still run; anything that
-            # would prompt is denied.
+            # would prompt is denied unless it is in the allowlist below.
             cmd += ["--permission-mode", "dontAsk"]
             accepted["permission_mode"] = "dontAsk"
         else:
             cmd += ["--permission-mode", "acceptEdits"]
             accepted["permission_mode"] = "acceptEdits"
-            if self.allowed_tools:
-                cmd += ["--allowed-tools", ",".join(self.allowed_tools)]
-                accepted["allowed_tools"] = list(self.allowed_tools)
+        if self.allowed_tools:
+            # The allowlist names tools that need no prompt in either
+            # profile (DUET's own MCP tools for a managed peer). Write tools
+            # must not be listed for a read-only session.
+            cmd += ["--allowed-tools", ",".join(self.allowed_tools)]
+            accepted["allowed_tools"] = list(self.allowed_tools)
         if self.supports("--permission-prompts"):
             # Nobody answers prompts in a managed turn: deny instead of waiting.
             cmd += ["--permission-prompts", "none"]

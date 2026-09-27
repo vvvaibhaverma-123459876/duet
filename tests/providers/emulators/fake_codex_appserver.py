@@ -125,6 +125,17 @@ def handle(msg):
             pending_interrupt[turn_id] = thread_id
             return
         text = params["input"][0]["text"]
+        if MODE == "peer":
+            # Act through the DUET MCP server from the thread's config (see agent_brain.py).
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import agent_brain
+
+            server = ((threads.get(thread_id) or {}).get("config") or {}).get("mcp_servers", {}).get("duet")
+            reply = agent_brain.act(text, server)
+            send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread_id, "turnId": turn_id, "tokenUsage": usage(n)}, "emittedAtMs": 1})
+            send({"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "completedAtMs": 1, "item": {"type": "agentMessage", "id": "a1", "text": reply, "phase": None}}})
+            complete_turn(thread_id, turn_id)
+            return
         send({"method": "item/agentMessage/delta", "params": {"threadId": thread_id, "turnId": turn_id, "itemId": "a1", "delta": "partial"}})
         send({"method": "thread/tokenUsage/updated", "params": {"threadId": thread_id, "turnId": turn_id, "tokenUsage": usage(n)}, "emittedAtMs": 1})
         send({"method": "account/rateLimits/updated", "params": {"rateLimits": {"limitId": "codex", "primary": {"usedPercent": 43, "windowDurationMins": 300, "resetsAt": 1790500000}}}})

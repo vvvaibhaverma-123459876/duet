@@ -441,7 +441,10 @@ class Runtime:
         }
 
         def run(tx: Tx) -> dict:
-            run_row = self._live_run(tx, run_id)
+            # A terminal run's log is closed, except for the controller's
+            # closing STATUS (e.g. "completed; committed as abc123").
+            closing = principal.kind == "controller" and kind_value == MessageKind.STATUS
+            run_row = self._run(tx, run_id) if closing else self._live_run(tx, run_id)
             policy = self._policy(tx, run_row)
             sender = principal.id if principal.is_participant else principal.kind
             recipient_id = self._resolve_recipient(tx, run_id, recipient) if recipient is not None else None
@@ -865,31 +868,47 @@ class Runtime:
         by the write lock: two dispatchers can never claim the same action."""
         if principal.kind != "controller":
             raise Unauthorized("only the controller dispatches actions")
-        owner = str(self.identity)
         with self.store.transaction() as tx:
             rows = tx.query("SELECT * FROM outbox WHERE state = ? ORDER BY created_at, outbox_id LIMIT 1", (OutboxState.PENDING.value,))
             if not rows:
                 return None
-            outbox = dict(rows[0])
-            action = tx.require("actions", outbox["action_id"])
-            lease = self._acquire_lease(tx, f"action:{action['action_id']}", owner, lease_seconds, principal)
-            tx.emit(
-                self._event(
-                    "outbox.claimed",
-                    {"outbox_id": outbox["outbox_id"], "claimed_by": owner, "fencing_token": lease["fencing_token"]},
-                    principal,
-                    outbox["run_id"],
-                )
+            return self._claim_outbox(tx, dict(rows[0]), principal, lease_seconds)
+
+    def claim_action(self, principal: Principal, action_id: str, *, lease_seconds: int = DEFAULT_ACTION_LEASE_SECONDS) -> dict:
+        """Claim one specific planned action, for a dispatcher that planned it
+        itself (a peer driver, a check runner). Fails if anyone else already
+        claimed it."""
+        if principal.kind != "controller":
+            raise Unauthorized("only the controller dispatches actions")
+        with self.store.transaction() as tx:
+            rows = tx.query("SELECT * FROM outbox WHERE action_id = ?", (check_text(action_id, "action_id", limit=MAX_ID),))
+            if not rows:
+                raise NotFound(f"action {action_id} has no outbox record")
+            if rows[0]["state"] != OutboxState.PENDING.value:
+                raise Conflict(f"action {action_id} was already claimed ({rows[0]['state']})")
+            return self._claim_outbox(tx, dict(rows[0]), principal, lease_seconds)
+
+    def _claim_outbox(self, tx: Tx, outbox: dict, principal: Principal, lease_seconds: int) -> dict:
+        owner = str(self.identity)
+        action = tx.require("actions", outbox["action_id"])
+        lease = self._acquire_lease(tx, f"action:{action['action_id']}", owner, lease_seconds, principal)
+        tx.emit(
+            self._event(
+                "outbox.claimed",
+                {"outbox_id": outbox["outbox_id"], "claimed_by": owner, "fencing_token": lease["fencing_token"]},
+                principal,
+                outbox["run_id"],
             )
-            tx.emit(
-                self._event(
-                    "action.transition",
-                    {"action_id": action["action_id"], "from": action["state"], "to": ActionState.DISPATCHING.value},
-                    principal,
-                    outbox["run_id"],
-                )
+        )
+        tx.emit(
+            self._event(
+                "action.transition",
+                {"action_id": action["action_id"], "from": action["state"], "to": ActionState.DISPATCHING.value},
+                principal,
+                outbox["run_id"],
             )
-            return {"action": dict(tx.require("actions", action["action_id"])), "lease": lease}
+        )
+        return {"action": dict(tx.require("actions", action["action_id"])), "lease": lease}
 
     def record_action(
         self,
