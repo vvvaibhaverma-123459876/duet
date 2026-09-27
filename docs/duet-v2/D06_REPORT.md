@@ -47,6 +47,26 @@ note, the legacy cost scope, provider API keys in managed peers' environment,
 Codex notification ordering and token scope) are being fixed in a separate
 change. See `HANDOFF.md`.
 
+## Review findings (D06–D07, internal Claude review)
+
+A second internal review, again by Claude agents with a reproduction for
+each finding, covered D06 and D07. It is not the independent Codex review the
+specification requires. The findings below are the task-graph and completion
+ones, numbered as in the review. The other findings (usage accounting and
+in-doubt actions) are not part of this change. All regression tests are in
+`tests/integrations/test_taskgraph.py`, class `TestReviewFindings`, and each
+fails on the code before the fix.
+
+| # | Finding | Fix | Test |
+|---|---|---|---|
+| 1 | `try_complete` marked the main task VERIFIED before the gate ran. A non-transient failure (a protected input changed, a stale workspace, a later change request) left it VERIFIED: it could not be claimed or submitted again, and the run was stuck. | The predicate is evaluated first, with the main task assumed verified (`CompletionGate.evaluate(assume_verified=...)`); the task is marked only when nothing but the checkpoint is missing. A failure found after the mark moves it back to REVIEW_REQUIRED. A `scope_and_policy` failure reopens the task (CHANGES_REQUESTED, BLOCKER to the writer). `_changes_requested` also reopens a VERIFIED main task (VERIFIED → REVIEW_REQUIRED → CHANGES_REQUESTED). | `test_a_failed_predicate_does_not_strand_the_main_task`, `test_a_verified_main_task_can_still_be_reopened` |
+| 2 | Accepting a required task after the main snapshot was approved re-evaluated nothing, so a native pair stayed REVIEWING. | `decide_task` calls `try_complete` after an acceptance (the only other place a task becomes VERIFIED); `decide_plan` does too after an acceptance, since the plan is a contribution. | `test_a_required_task_accepted_last_completes_the_run` |
+| 3 | After `duet_handoff` the next submitter became the author of the outgoing writer's files (snapshot ids are per tree), got the `code` contribution, and the real author's approval passed as a non-author review. | A handoff or takeover records the workspace as a snapshot authored by the outgoing writer. `code` is credited only to a snapshot's stored author (the first to record that tree, so always for changes of their own). The gate ignores approvals from anyone who wrote part of the approved diff: the author, and the author of any earlier capture that changed one of its changed paths. This is conservative: whoever wrote an earlier version of a file cannot approve the result. Submitting a tree someone else authored sends no review request to that author and says so. | `test_after_a_handoff_the_outgoing_writer_stays_the_author`, `test_an_approval_from_a_co_author_does_not_count` |
+| 4 | Plan decisions checked PROPOSED outside any transaction and created tasks before the atomic `plan.decided`: concurrent accepts duplicated tasks, and a withdraw mid-accept still added tasks. The one-pending-plan rule and the active-claim bound were check-then-act too. | An acceptance creates its tasks, the proposer's contribution and `plan.decided` in one write transaction that re-reads the plan state and re-validates the plan (BEGIN IMMEDIATE, so this holds across processes). A proposal checks for a pending plan and validates inside its own write transaction. Claims (bound check plus runtime claim) are serialised per run by a lock in `TaskGraph.claim`. That lock is per process, which covers participant operations because they only run in the DUET service (one per state directory, held by a file lock). | `test_concurrent_accepts_create_the_plan_once`, `test_a_plan_withdrawn_before_the_accept_commits_adds_nothing`, `test_a_withdraw_during_the_accept_waits_and_is_refused`, `test_concurrent_proposals_leave_one_plan_pending`, `test_concurrent_claims_respect_the_active_bound` |
+| 9 | A managed writer was never woken after a re-plan. The acceptance reached the proposer as a STATUS, and the main-task suggestion was suppressed for good by the in-memory nudge set. | The proposer gets the acceptance as a controller TASK_PROPOSAL. A rejection is a BLOCKER while a task waits for a re-plan. Nudges are keyed by the task's state version, so a task that becomes claimable again (unblocked, handed back, reopened) is suggested again. `peers._actionable` is unchanged. | `test_the_writer_is_woken_after_a_replan` |
+| 10 | At 32 tasks a re-plan block was permanent: only an accepted plan lifts it, and `validate_plan` refuses any plan in a full graph. | Smallest honest fix: when a re-plan is due and the run already holds `MAX_TASKS_PER_RUN` tasks, the run pauses (PAUSED_APPROVAL, intervention `pause`) and states the reason, instead of blocking the task. The bound itself is unchanged. | `test_a_replan_in_a_full_graph_pauses` |
+| 11 | Failure signatures were `check:<id>:<status>:<exit>` with no output hash, so different failures counted as one repeated failure and blocked or paused early. | The signature adds a digest of the check's recorded output. The raw `output_hash` alone would not work: each check runs in a new temporary copy whose path appears in tracebacks, so identical failures would never match. The scratch path, durations and memory addresses are normalised away first, and the stored `output_hash` is used if the output cannot be read. | `test_different_failures_are_not_one_repeated_failure`, `test_the_failure_signature_ignores_temporary_paths_and_timings` (identical failures still match: `test_repeated_failures_replan_then_pause`) |
+
 ## Tests
 
 - New: `tests/runtime/test_scheduler_sim.py` (82),
@@ -62,6 +82,10 @@ change. See `HANDOFF.md`.
 
 - One writer per run. Code tasks cannot run in parallel until D11 adds
   parallel workspaces.
+- An approval counts only from a participant who wrote none of the approved
+  diff. If both participants wrote part of it (for example, one edits after a
+  handoff), no approval counts. The run then cannot reach COMPLETED_VERIFIED,
+  and the gate reports why. There is no per-file review yet.
 - Stall detection keeps its message window in the service's memory, so a
   restart resets it. Failure history is read from the store and survives.
 - The scheduler suggests, and participants decide. Nothing forces a native

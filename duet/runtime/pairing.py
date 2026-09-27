@@ -739,8 +739,7 @@ class PairCoordinator:
         if task["state"] in (TaskState.CLAIMED.value, TaskState.RUNNING.value) and task["owner"] == principal.id:
             claimed = task
         else:
-            self.graph.check_claim(principal, task)
-            claimed = self.runtime.claim_task(principal, task_id, expected_version=task["state_version"])["task"]
+            claimed = self.graph.claim(principal, task)
         if claimed["state"] == TaskState.CLAIMED.value:
             claimed = self.runtime.transition_task(
                 principal, task_id, TaskState.RUNNING, expected_version=claimed["state_version"], fence=self._task_fence(task_id, principal.id), reason="work started"
@@ -782,8 +781,7 @@ class PairCoordinator:
         snapshot_id = row["snapshot_id"]
         with self._lock:
             self._snapshots[snapshot_id] = snap
-        if snap.changed:
-            self.graph.record_contribution(run_id, principal.id, "code", snapshot_id, f"changed {', '.join(list(snap.changed)[:5])}")
+        self.graph.credit_code(run_id, principal.id, row)
         # Each submission is its own record: resubmitting an earlier tree (a
         # revert) makes that snapshot the latest again.
         with self.runtime.store.transaction() as tx:
@@ -805,7 +803,17 @@ class PairCoordinator:
         }
         if not snap.changed:
             result["warning"] = "the snapshot has no changes against the base commit"
-        if request_review:
+        if row["author"] not in (None, principal.id):
+            # These exact files were recorded before, as another participant's
+            # work (typically when the writer role moved to you): the change
+            # stays theirs, and they cannot review it.
+            author = self._participant(row["author"])["provider"]
+            result["note"] = (
+                f"these exact files were recorded earlier as {author}'s work (for example what {author} left when the writer role "
+                f"moved to you): the change is credited to {author}, not to you, and {author} cannot review it. If you changed none "
+                f"of it, you are the non-author reviewer: duet_send(kind='REVIEW_RESULT', snapshot_id='{snapshot_id}', review={{...}})."
+            )
+        elif request_review:
             result["review_request"] = self.request_review(principal, snapshot_id=snapshot_id, note=note or summary)
         self.notify()
         self.graph.observe(run_id, "submission")
@@ -940,6 +948,11 @@ class PairCoordinator:
             return  # feedback on an older snapshot does not reopen newer work
         task_id = self._main_task_id(run_id)
         task = self._task(task_id, run_id)
+        if task["state"] == TaskState.VERIFIED.value:
+            # Marked verified, but the run did not complete (an action was
+            # still settling) and the snapshot is now contested: without this
+            # the writer could neither claim nor submit again.
+            task = self.runtime.transition_task(CONTROLLER, task_id, TaskState.REVIEW_REQUIRED, expected_version=task["state_version"], reason=reason[:MAX_TEXT])
         if task["state"] == TaskState.REVIEW_REQUIRED.value:
             self.runtime.transition_task(CONTROLLER, task_id, TaskState.CHANGES_REQUESTED, expected_version=task["state_version"], reason=reason[:MAX_TEXT])
         run = self.runtime.get_run(CONTROLLER, run_id)
@@ -962,6 +975,11 @@ class PairCoordinator:
             # claim it and submit again.
             self._changes_requested(run_id, report["stale_snapshot"], f"the workspace changed after {report['stale_snapshot']} was submitted; its evidence no longer describes the files. Submit again.")
             return None
+        if report is not None and report.get("reopen"):
+            # The snapshot itself breaks the contract (e.g. a protected input
+            # changed): only a new submission can fix it, so reopen the task.
+            self._changes_requested(run_id, report["snapshot_id"], report["reopen"])
+            return report
         if report is not None and report.get("outcome") == COMPLETED_VERIFIED and report.get("satisfied"):
             if self.peer_stopper is not None:
                 self.peer_stopper(run_id)
@@ -997,18 +1015,34 @@ class PairCoordinator:
             snap = snap or current
             task_id = self._main_task_id(run_id)
             task = self._task(task_id, run_id)
-            if task["state"] == TaskState.REVIEW_REQUIRED.value:
-                self.runtime.transition_task(CONTROLLER, task_id, TaskState.VERIFIED, expected_version=task["state_version"], reason=f"checks passed and review approved on {snapshot_id}")
-            report = self.gate.finalize(run_id, snapshot_id, workspace=ws.path, snapshot=snap)
+            # The predicate is evaluated before the main task is marked: a
+            # VERIFIED task can be neither claimed nor submitted again, so
+            # marking it and then failing (a protected input changed, an
+            # approval that does not count) would strand the run.
+            verifying = task["state"] == TaskState.REVIEW_REQUIRED.value
+            report = self.gate.evaluate(run_id, snapshot_id, workspace=ws.path, snapshot=snap, assume_verified=(task_id,) if verifying else ())
+            if not any(item.name != "checkpoint_exported" for item in report.missing):
+                if verifying:
+                    task = self.runtime.transition_task(CONTROLLER, task_id, TaskState.VERIFIED, expected_version=task["state_version"], reason=f"checks passed and review approved on {snapshot_id}")
+                report = self.gate.finalize(run_id, snapshot_id, workspace=ws.path, snapshot=snap)
             if report.outcome != COMPLETED_VERIFIED or not report.satisfied:
                 # Actions still in flight (e.g. the reviewer's own turn) settle
                 # shortly and trigger another evaluation; no need to announce.
                 transient = {"no_unobserved_actions", "checkpoint_exported"}
-                if any(item.name not in transient for item in report.missing):
-                    missing = "; ".join(f"{i.name}: {i.detail}" for i in report.missing)
-                    for part in self.runtime.participants(CONTROLLER, run_id):
-                        self._status(run_id, part["participant_id"], f"Not complete yet ({report.outcome}): {missing}")
+                lasting = [item for item in report.missing if item.name not in transient]
+                if not lasting:
+                    self.notify()
+                    return report.to_dict()
+                task = self._task(task_id, run_id)
+                if task["state"] == TaskState.VERIFIED.value:  # the predicate changed after the mark
+                    self.runtime.transition_task(CONTROLLER, task_id, TaskState.REVIEW_REQUIRED, expected_version=task["state_version"], reason="completion predicate no longer holds")
+                missing = "; ".join(f"{i.name}: {i.detail}" for i in report.missing)
+                for part in self.runtime.participants(CONTROLLER, run_id):
+                    self._status(run_id, part["participant_id"], f"Not complete yet ({report.outcome}): {missing}")
                 self.notify()
+                scope = next((item for item in lasting if item.name == "scope_and_policy"), None)
+                if scope is not None:
+                    return {**report.to_dict(), "reopen": f"{snapshot_id} cannot be accepted: {scope.detail}. Fix it and submit again."}
                 return report.to_dict()
             committed, detail = self._commit_deliverable(run_id, ws, snap, snapshot_id)
             self._release_writer(run_id)

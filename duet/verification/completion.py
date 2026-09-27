@@ -86,14 +86,21 @@ class CompletionGate:
         self.evidence = evidence
         self.artifacts = artifacts
 
-    def evaluate(self, run_id: str, snapshot_id: str, *, workspace: Path | None = None, snapshot: Snapshot | None = None) -> CompletionReport:
+    def evaluate(
+        self, run_id: str, snapshot_id: str, *, workspace: Path | None = None, snapshot: Snapshot | None = None,
+        assume_verified: tuple[str, ...] = (),
+    ) -> CompletionReport:
+        """`assume_verified`: tasks the caller will mark VERIFIED from this
+        very evaluation (the main task, whose checks and review are what is
+        being evaluated), so the predicate can be checked before the mark.
+        `finalize` never assumes anything."""
         tx = self.runtime.store.read()
         run = self.runtime._run(tx, run_id)
         contract = AcceptanceContract.from_dict(json.loads(run["acceptance_json"]))
         acceptance_hash = run["acceptance_hash"]
         snap = tx.require("snapshots", snapshot_id)
         items = [
-            self._tasks(tx, run_id),
+            self._tasks(tx, run_id, assume_verified),
             self._checks(run_id, snapshot_id, acceptance_hash, contract),
             self._reviews(tx, run, snap, contract),
             self._findings(run_id),
@@ -107,9 +114,9 @@ class CompletionGate:
     # -- predicate items -------------------------------------------------------------
 
     @staticmethod
-    def _tasks(tx, run_id: str) -> PredicateItem:
+    def _tasks(tx, run_id: str, assume_verified: tuple[str, ...] = ()) -> PredicateItem:
         rows = tx.query("SELECT task_id, state, description FROM tasks WHERE run_id = ? AND required = 1", (run_id,))
-        open_tasks = [r for r in rows if r["state"] != TaskState.VERIFIED.value]
+        open_tasks = [r for r in rows if r["state"] != TaskState.VERIFIED.value and r["task_id"] not in assume_verified]
         if open_tasks:
             listed = ", ".join(f"{r['task_id']} ({r['state']})" for r in open_tasks[:5])
             return PredicateItem("required_tasks", False, f"{len(open_tasks)} required task(s) not verified: {listed}")
@@ -135,11 +142,14 @@ class CompletionGate:
         if not contract.review_required():
             return PredicateItem("non_author_review", True, "the contract requires no review")
         reviews = self.evidence.reviews_for(run["run_id"], snap["snapshot_id"], run["acceptance_hash"])
-        author = snap["author"]
-        author_provider = tx.require("participants", author)["provider"] if author else None
+        authors = self._diff_authors(tx, snap)
+        author_providers = {tx.require("participants", a)["provider"] for a in authors}
         latest_by_reviewer: dict[str, dict] = {}
+        coauthor_approvals: set[str] = set()
         for review in reviews:
-            if review["reviewer"] == author or (author_provider and review["reviewer_provider"] == author_provider):
+            if review["reviewer"] in authors or review["reviewer_provider"] in author_providers:
+                if review["disposition"] == "approve":
+                    coauthor_approvals.add(review["reviewer_provider"])
                 continue
             if review["disposition"] in ("approve", "changes_requested"):
                 latest_by_reviewer[review["reviewer"]] = review
@@ -148,10 +158,33 @@ class CompletionGate:
         if blocked:
             return PredicateItem("non_author_review", False, f"changes requested on this snapshot by {', '.join(r['reviewer_provider'] for r in blocked)}")
         if not approvals:
+            if coauthor_approvals:
+                return PredicateItem(
+                    "non_author_review", False,
+                    f"no non-author approval for {snap['snapshot_id']}: {', '.join(sorted(coauthor_approvals))} approved it but wrote part of "
+                    "this diff, and an author's approval is not a review",
+                )
             stale = tx.scalar("SELECT COUNT(*) FROM reviews WHERE run_id = ? AND disposition = 'approve'", (run["run_id"],))
             hint = f" ({stale} approval(s) exist for other snapshots or contract versions and no longer apply)" if stale else ""
             return PredicateItem("non_author_review", False, f"no non-author approval for {snap['snapshot_id']}{hint}")
         return PredicateItem("non_author_review", True, f"approved by {', '.join(r['reviewer_provider'] for r in approvals)}")
+
+    @staticmethod
+    def _diff_authors(tx, snap: dict) -> set[str]:
+        """Participants who wrote part of this snapshot's diff: its author,
+        and the author of every capture up to its own that changed one of
+        the paths it changes. The workspace is captured whenever the writer
+        role moves, so each writer's edits carry their name even when the
+        next writer submits them. Conservative: whoever wrote an earlier
+        version of a changed file is not a non-author of the result."""
+        changed = set(json.loads(snap["changed_json"]))
+        authors = {snap["author"]} if snap["author"] else set()
+        for row in tx.query("SELECT snapshot_id, author, changed_json FROM snapshots WHERE run_id = ? ORDER BY created_at, rowid", (snap["run_id"],)):
+            if row["author"] and changed & set(json.loads(row["changed_json"])):
+                authors.add(row["author"])
+            if row["snapshot_id"] == snap["snapshot_id"]:
+                break
+        return authors
 
     def _findings(self, run_id: str) -> PredicateItem:
         open_blocking = self.evidence.open_blocking_findings(run_id)
