@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -144,9 +143,7 @@ class TestRunBounded:
         result = run_bounded(
             [sys.executable, "-c", "import os; print(os.getpgid(0) == os.getpid())"], cwd=tmp_path, timeout=10
         )
-        assert result.stdout.strip() == "True"
-        assert os.getpgid(0) != 0  # sanity: our own group is untouched
-        assert signal.SIGTERM  # imported for clarity of the kill sequence under test
+        assert result.stdout.strip() == "True"  # the child leads its own process group
 
 
 def test_stdin_defaults_to_devnull(tmp_path: Path):

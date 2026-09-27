@@ -34,9 +34,9 @@ compatibility.
 | R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
 | R07 | Completion reserve | D08 | NOT_STARTED |
 | R08 | Supported controls only | D04, D09 | NOT_STARTED |
-| R09 | Evidence-based completion | D01, D03, D10 | LEGACY: TESTED_SIM (`success` requires a passing verifier; DONE alone is `unverified`); v2 NOT_STARTED |
-| R10 | Revision integrity | D03, D10 | NOT_STARTED |
-| R11 | Safe writes | D03, D11 | LEGACY_PARTIAL (lock + branch/worktree) |
+| R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM: legacy (D01) and v2 predicate with controller-only finalisation (D03); joint authorship: D10 |
+| R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; mutation invalidates); delta reviews and caching: D10 |
+| R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree leaves the user checkout byte-identical; one fenced writer; explicit checked imports); integration locking: D11 |
 | R12 | Recoverability | D02, D11 | TESTED_SIM (runtime: atomic transactions, IN_DOUBT reconciliation, no blind re-dispatch); full crash matrix: D11 |
 | R13 | No silent paid fallback | D04, D08 | LEGACY_PARTIAL (no fallback exists) |
 | R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2 NOT_STARTED |
@@ -66,13 +66,13 @@ compatibility.
 | AT18 | User pins model/effort | D09/D12 | | NOT_STARTED |
 | AT19 | Missing dependency failure | D09 | | NOT_STARTED |
 | AT20 | Repeated no-progress repairs | D06/D09 | | NOT_STARTED |
-| AT21 | Old green suite, feature absent | D01/D10 | `test_d01_semantics.py::TestCompletion::test_suite_green_at_baseline_does_not_end_the_session` | LEGACY: TESTED_SIM (no acceptance contract yet: D10) |
+| AT21 | Old green suite, feature absent | D01/D10 | legacy `test_suite_green_at_baseline_does_not_end_the_session`; v2 `test_green_existing_suite_without_the_feature_is_not_complete` | TESTED_SIM |
 | AT22 | DONE with missing verifier | D01 | `test_d01_semantics.py::TestCompletion::test_done_with_missing_verifier_is_unverified`, battery `test_scratch_run_without_verifier_is_unverified` | TESTED_SIM |
-| AT23 | Approval of old revision | D10 | | NOT_STARTED |
-| AT24 | Agent edits acceptance policy | D03/D10 | | NOT_STARTED |
+| AT23 | Approval of old revision | D10 | `test_approval_of_an_old_snapshot_does_not_count` | TESTED_SIM (D03); delta-review rules: D10 |
+| AT24 | Agent edits acceptance policy | D03/D10 | `test_participants_cannot_change_the_contract`, `test_weakened_protected_check_blocks_completion`, `test_protected_paths_detect_weakened_tests` | TESTED_SIM |
 | AT25 | Joint authorship reviews | D10 | | NOT_STARTED |
-| AT26 | Dirty active checkout | D03 | | LEGACY_PARTIAL (clean-tree check, `--allow-dirty` stash) |
-| AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | | NOT_STARTED |
+| AT26 | Dirty active checkout | D03 | `test_user_checkout_is_untouched`, `test_import_inputs_is_explicit_and_checked` | TESTED_SIM |
+| AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | `test_inputs_exclude_ignored_sensitive_and_escaping_links`, `test_import_inputs_is_explicit_and_checked`, `test_sensitive_classifier` | TESTED_SIM (D03); threat-model pass: D13 |
 | AT28 | Concurrent writers | D11 | | NOT_STARTED |
 | AT29 | Crash around dispatch | D02/D11 | `test_crash_mid_transaction_leaves_no_partial_state`, `test_in_doubt_is_never_redispatched`, `test_reconcile_uses_process_identity_not_just_expiry` | TESTED_SIM (runtime); provider-level: D11 |
 | AT30 | Crash during commit/integration | D11 | | NOT_STARTED |
@@ -80,8 +80,8 @@ compatibility.
 | AT32 | PID reuse / unrelated sessions | D11 | | LEGACY_PARTIAL (`stop` confirms; name matching) |
 | AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval` | TESTED_SIM (runtime); end-to-end over MCP: D05/D13 |
 | AT34 | Malformed/flooded provider output | D04 | `test_process.py::test_flooding_child_is_bounded_at_capture`, `TestAdapter::test_json_output_over_the_cap_is_a_structured_failure` | LEGACY: TESTED_SIM; v2 streaming adapters: D04 |
-| AT35 | Unknown/failed/skipped required check | D03/D10 | | NOT_STARTED |
-| AT36 | Inputs mutate during verification | D03 | | NOT_STARTED |
+| AT35 | Unknown/failed/skipped required check | D03/D10 | `test_unknown_or_missing_required_check_blocks`, `test_no_tests_is_not_a_pass`, `test_contract_without_checks_can_never_verify` | TESTED_SIM |
+| AT36 | Inputs mutate during verification | D03 | `test_mutation_during_check_invalidates`, `test_transient_caches_do_not_invalidate` | TESTED_SIM |
 | AT37 | Legacy transcript/config migration | D13 | | NOT_STARTED |
 | AT38 | Wheel without source tree | D13 | `test_packaging.py` | TESTED_SIM for defaults (migrations/skills added as they land) |
 | AT39 | Integration install/uninstall | D12/D13 | | NOT_STARTED |

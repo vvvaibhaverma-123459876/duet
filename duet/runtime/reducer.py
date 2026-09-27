@@ -94,6 +94,30 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
         ),
     ),
     "leases": ("resource", ("resource", "owner", "fencing_token", "acquired_at", "expires_at", "released_at")),
+    # D03: evidence model (migration 0002)
+    "snapshots": (
+        "snapshot_id",
+        ("snapshot_id", "run_id", "tree_hash", "base_sha", "author", "file_count", "changed_json", "excluded_json", "manifest_ref", "created_at"),
+    ),
+    "evidence": (
+        "evidence_id",
+        (
+            "evidence_id", "run_id", "check_id", "snapshot_id", "acceptance_hash", "argv_json", "cwd", "env_fingerprint",
+            "status", "exit_code", "started_at", "ended_at", "output_hash", "artifact_ref", "producer", "trust", "detail",
+        ),
+    ),
+    "reviews": (
+        "review_id",
+        ("review_id", "run_id", "reviewer", "reviewer_provider", "snapshot_id", "acceptance_hash", "scope_json", "disposition", "summary", "created_at"),
+    ),
+    "findings": (
+        "finding_id",
+        ("finding_id", "run_id", "review_id", "severity", "summary", "location", "status", "resolution", "resolved_by", "created_at", "updated_at"),
+    ),
+    "checkpoints": (
+        "checkpoint_id",
+        ("checkpoint_id", "run_id", "snapshot_id", "acceptance_hash", "report_hash", "artifact_ref", "created_at"),
+    ),
 }
 REPLAYED_TABLES = tuple(TABLES)
 
@@ -598,6 +622,139 @@ def _lease_released(p: dict, e: Event, get: Getter) -> list[Upsert]:
     return [("leases", row)]
 
 
+def _snapshot_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    existing = get("snapshots", p["snapshot_id"])
+    if existing is not None:
+        if existing["tree_hash"] != p["tree_hash"]:
+            raise InvalidTransition("snapshot id collision with a different tree")
+        return []  # recording the same tree twice is a no-op
+    return [
+        (
+            "snapshots",
+            {
+                "snapshot_id": p["snapshot_id"],
+                "run_id": p["run_id"],
+                "tree_hash": p["tree_hash"],
+                "base_sha": p.get("base_sha"),
+                "author": p.get("author"),
+                "file_count": p["file_count"],
+                "changed_json": _j(p["changed"]),
+                "excluded_json": _j(p["excluded"]),
+                "manifest_ref": p.get("manifest_ref"),
+                "created_at": e.at,
+            },
+        )
+    ]
+
+
+def _evidence_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    snapshot = _require(get, "snapshots", p["snapshot_id"])
+    if snapshot["run_id"] != p["run_id"]:
+        raise InvalidTransition("evidence snapshot belongs to another run")
+    if p["status"] not in ("passed", "failed", "unknown", "invalidated", "cancelled"):
+        raise ValidationError(f"unknown evidence status {p['status']!r}")
+    return [
+        (
+            "evidence",
+            {
+                "evidence_id": p["evidence_id"],
+                "run_id": p["run_id"],
+                "check_id": p["check_id"],
+                "snapshot_id": p["snapshot_id"],
+                "acceptance_hash": p["acceptance_hash"],
+                "argv_json": _j(p["argv"]),
+                "cwd": p["cwd"],
+                "env_fingerprint": p["env_fingerprint"],
+                "status": p["status"],
+                "exit_code": p.get("exit_code"),
+                "started_at": p["started_at"],
+                "ended_at": p["ended_at"],
+                "output_hash": p["output_hash"],
+                "artifact_ref": p.get("artifact_ref"),
+                "producer": p["producer"],
+                "trust": p["trust"],
+                "detail": p.get("detail", ""),
+            },
+        )
+    ]
+
+
+def _review_submitted(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    snapshot = _require(get, "snapshots", p["snapshot_id"])
+    if snapshot["run_id"] != p["run_id"]:
+        raise InvalidTransition("reviewed snapshot belongs to another run")
+    if p["disposition"] not in ("approve", "changes_requested", "comment"):
+        raise ValidationError(f"unknown review disposition {p['disposition']!r}")
+    upserts: list[Upsert] = [
+        (
+            "reviews",
+            {
+                "review_id": p["review_id"],
+                "run_id": p["run_id"],
+                "reviewer": p["reviewer"],
+                "reviewer_provider": p["reviewer_provider"],
+                "snapshot_id": p["snapshot_id"],
+                "acceptance_hash": p["acceptance_hash"],
+                "scope_json": _j(p["scope"]),
+                "disposition": p["disposition"],
+                "summary": p["summary"],
+                "created_at": e.at,
+            },
+        )
+    ]
+    for finding in p.get("findings", []):
+        if finding["severity"] not in ("blocking", "non_blocking"):
+            raise ValidationError(f"unknown finding severity {finding['severity']!r}")
+        upserts.append(
+            (
+                "findings",
+                {
+                    "finding_id": finding["finding_id"],
+                    "run_id": p["run_id"],
+                    "review_id": p["review_id"],
+                    "severity": finding["severity"],
+                    "summary": finding["summary"],
+                    "location": finding.get("location"),
+                    "status": "open",
+                    "resolution": None,
+                    "resolved_by": None,
+                    "created_at": e.at,
+                    "updated_at": e.at,
+                },
+            )
+        )
+    return upserts
+
+
+def _finding_resolved(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "findings", p["finding_id"])
+    if row["status"] != "open":
+        raise InvalidTransition(f"finding {p['finding_id']} is already {row['status']}")
+    if p["status"] not in ("resolved", "withdrawn"):
+        raise ValidationError(f"unknown finding status {p['status']!r}")
+    row.update(status=p["status"], resolution=p["resolution"], resolved_by=p["resolved_by"], updated_at=e.at)
+    return [("findings", row)]
+
+
+def _checkpoint_exported(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "snapshots", p["snapshot_id"])
+    return [
+        (
+            "checkpoints",
+            {
+                "checkpoint_id": p["checkpoint_id"],
+                "run_id": p["run_id"],
+                "snapshot_id": p["snapshot_id"],
+                "acceptance_hash": p["acceptance_hash"],
+                "report_hash": p["report_hash"],
+                "artifact_ref": p["artifact_ref"],
+                "created_at": e.at,
+            },
+        )
+    ]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -623,6 +780,11 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "lease.acquired": _lease_acquired,
     "lease.renewed": _lease_renewed,
     "lease.released": _lease_released,
+    "snapshot.recorded": _snapshot_recorded,
+    "evidence.recorded": _evidence_recorded,
+    "review.submitted": _review_submitted,
+    "finding.resolved": _finding_resolved,
+    "checkpoint.exported": _checkpoint_exported,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

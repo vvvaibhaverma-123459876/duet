@@ -114,3 +114,32 @@ so a reused PID or a reboot never looks like the old owner. `reconcile()`
 releases dead or expired leases and moves in-flight actions to `IN_DOUBT`.
 IN_DOUBT is settled only by `resolve_in_doubt` with a reconciliation record,
 and there is no transition back to dispatch.
+
+## D-013: Strict-mode input policy (D03)
+
+Strict workspaces are `git worktree`s under the private state directory, on a
+new `duet/run-*` branch from an explicit base commit. Nothing untracked or
+ignored is copied from the user's checkout. Dirty work arrives only through
+`import_inputs` with an explicit list, which refuses secrets (unless
+approved), `.git` internals, `..` paths, escaping symlinks and oversized
+files. Snapshots hash tracked files as they are on disk. They include
+untracked files that pass the input policy, and ignored files only on
+explicit request. Sensitive untracked files are excluded and reported;
+committed templates (`*.example`, `*.sample`) are not treated as secrets.
+Symlinks are hashed by target and never followed. Transient outputs
+(`__pycache__`, `.pytest_cache`, …) are not inputs.
+`feat/isolate-modes` snapshot mode keeps its copy-everything semantics as an
+explicit classic option; strict mode does not adopt them.
+
+## D-014: Evidence, reviews and the completion predicate (D03)
+
+Check evidence is recorded only by the controller, keyed to (snapshot, current
+acceptance hash). It is refused if the check ran on inputs other than the
+snapshot's. A check whose inputs change while it runs is `invalidated`.
+Reviews are keyed the same way, and the reviewer must not be the author or
+the author's provider. An approval cannot carry blocking findings. Blocking
+findings are closed only by their raiser or the controller. The final
+predicate evaluates all eight spec items. `finalize` exports the checkpoint as
+the report stands once exported, re-evaluates from the store, and only then
+moves the run to COMPLETED_VERIFIED. A contract with no required checks can
+never verify.
