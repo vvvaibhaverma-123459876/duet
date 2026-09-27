@@ -33,7 +33,7 @@ from typing import Any, Callable
 from ..verification.acceptance import AcceptanceContract, CheckSpec, Criterion
 from ..verification.completion import COMPLETED_VERIFIED, CompletionGate
 from ..verification.evidence import EvidenceService
-from ..verification.runner import run_check
+from ..verification.runner import run_check_on_snapshot
 from ..workspaces.manager import StrictWorkspace, WorkspaceManager
 from ..workspaces.repo import resolve_repo
 from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
@@ -71,6 +71,7 @@ from .contracts import (
     check_list,
     check_optional_text,
     check_text,
+    new_id,
     parse_enum,
     parse_utc,
     utc_after,
@@ -78,6 +79,7 @@ from .contracts import (
 from .identity import ProcessIdentity, hash_token
 from .paths import ensure_private_dir
 from .policy import AuthorisationPolicy
+from .taskplan import WRITE_KINDS
 
 DEFAULT_WAIT_SECONDS = 25.0
 # MCP clients time tool calls out (Codex defaults to 60 s); a wait returns
@@ -189,7 +191,11 @@ class PairCoordinator:
         self._generation = 0
         self._workspaces: dict[str, StrictWorkspace] = {}
         self._snapshots: dict[str, Snapshot] = {}
-        self._checks_running: dict[str, threading.Thread] = {}
+        self._checks_running: dict[str, threading.Thread] = {}  # checks still executing
+        self._check_threads: dict[str, threading.Thread] = {}  # including their follow-up
+        from .taskgraph import TaskGraph
+
+        self.graph = TaskGraph(self)
 
     # ------------------------------------------------------------------ notification
 
@@ -470,7 +476,9 @@ class PairCoordinator:
 
     def status(self, principal: Principal) -> dict:
         run_id = principal.run_id or ""
-        return self.run_status(run_id, viewer=principal.id)
+        status = self.run_status(run_id, viewer=principal.id)
+        status["next"] = self.graph.next_for(principal)
+        return status
 
     def run_status(self, run_id: str, *, viewer: str | None = None) -> dict:
         run = self.runtime.get_run(CONTROLLER, run_id)
@@ -484,7 +492,7 @@ class PairCoordinator:
             for p in self.runtime.participants(CONTROLLER, run_id)
         ]
         tasks = [
-            {k: t[k] for k in ("task_id", "description", "state", "owner", "required", "revision", "proposed_by")}
+            {k: t[k] for k in ("task_id", "kind", "description", "state", "owner", "required", "revision", "proposed_by", "depends_on")}
             for t in self.runtime.tasks(CONTROLLER, run_id)
         ]
         latest = self._latest_snapshot(run_id)
@@ -510,6 +518,15 @@ class PairCoordinator:
             )
         ]
         settings = self.settings(run_id)
+        plans = [
+            {"plan_id": r["plan_id"], "proposer": r["proposer"], "state": r["state"], "tasks": len(json.loads(r["tasks_json"]))}
+            for r in tx.query("SELECT * FROM plans WHERE run_id = ? ORDER BY created_at, rowid", (run_id,))
+        ]
+        contributions = [{"provider": c["provider"], "kind": c["kind"], "ref": c["ref"], "summary": c["summary"]} for c in self.graph.contributions(run_id)]
+        interventions = [
+            {"status": r["status"], "task_id": r["task_id"], "reason": r["reason"]}
+            for r in tx.query("SELECT * FROM interventions WHERE run_id = ? ORDER BY created_at, rowid", (run_id,))
+        ]
         return {
             "schema": "duet.pair-status/1",
             "run_id": run_id,
@@ -522,6 +539,9 @@ class PairCoordinator:
             "participants": participants,
             "tasks": tasks,
             "open_requests": open_requests,
+            "plans": plans,
+            "contributions": contributions,
+            "interventions": interventions,
             "verification": verification,
             "profile": "fixed (peer-alpha): no adaptive model or effort routing",
             "control_coverage": (
@@ -560,6 +580,7 @@ class PairCoordinator:
             snapshot_ref=snapshot_id, idempotency_key=idempotency_key,
         )
         self.notify()
+        self.graph.observe(principal.run_id or "", "message")
         return {**receipt, "note": "sent; this does not wait for an answer. Keep working or call duet_wait."}
 
     def _send_review(
@@ -582,6 +603,7 @@ class PairCoordinator:
             principal, snap, disposition=review.get("disposition", ""), summary=review.get("summary") or body,
             scope=review.get("scope"), findings=review.get("findings"),
         )
+        self.graph.record_contribution(principal.run_id or "", principal.id, "review", recorded["review_id"], f"{recorded['disposition']} on {snap}")
         for finding_id in resolves:
             self.evidence.resolve_finding(principal, finding_id, resolution=f"verified fixed in {snap}")
         receipt = self.runtime.send_message(
@@ -593,6 +615,7 @@ class PairCoordinator:
         if recorded["disposition"] == "changes_requested":
             self._changes_requested(run_id, snap, f"{principal.provider} requested changes: {(review.get('summary') or body)[:500]}")
         self.try_complete(run_id)
+        self.graph.observe(run_id, "review")
         return {**receipt, "review_id": recorded["review_id"], "findings": recorded["findings"]}
 
     def inbox(self, principal: Principal, *, ack_through: int | None = None, since: int | None = None, limit: int = 50) -> dict:
@@ -653,6 +676,7 @@ class PairCoordinator:
             "run": {"lifecycle": state["lifecycle"], "collaboration": state["collaboration"]},
             "peer": state["peer"],
             "watch": state["watch"],
+            "next": self.graph.next_for(principal) if RunLifecycle(state["lifecycle"]) not in TERMINAL_RUN else [],
             "advice": _wait_advice(woke, messages, state),
         }
 
@@ -696,53 +720,58 @@ class PairCoordinator:
 
     # ------------------------------------------------------------------ tasks
 
-    def propose_task(self, principal: Principal, *, description: str, depends_on: list[str] | None = None, acceptance_ids: list[str] | None = None) -> dict:
-        self._require_participant(principal)
-        count = self.runtime.store.read().scalar("SELECT COUNT(*) FROM tasks WHERE run_id = ?", (principal.run_id,)) or 0
-        if count >= MAX_TASKS_PER_RUN:
-            raise PolicyDenied(f"a run holds at most {MAX_TASKS_PER_RUN} tasks")
-        task = self.runtime.propose_task(principal, description=description, depends_on=depends_on, acceptance_ids=acceptance_ids)
-        task = self.runtime.transition_task(CONTROLLER, task["task_id"], TaskState.READY, expected_version=task["state_version"], reason="accepted by the controller")
-        self.notify()
-        return _task_view(task)
+    def propose_task(
+        self, principal: Principal, *, description: str, depends_on: list[str] | None = None,
+        acceptance_ids: list[str] | None = None, kind: str = "investigate",
+    ) -> dict:
+        """A one-task plan: the peer accepts it before the task exists."""
+        spec = {"key": "t1", "description": description, "kind": kind, "depends_on": depends_on or [], "acceptance_ids": acceptance_ids or []}
+        return self.graph.propose_plan(principal, tasks=[spec], rationale="single task proposal")
 
     def claim(self, principal: Principal, *, task_id: str | None = None) -> dict:
+        """Claim a ready task. Code tasks belong to the run's single writer;
+        investigation, test-design and review tasks to either participant."""
         self._require_participant(principal)
         run_id = principal.run_id or ""
-        writer = self._writer_id(run_id)
-        if writer != principal.id:
-            raise PolicyDenied("this run has one writer and it is your peer; review their snapshots instead of editing")
-        task_id = task_id or self._main_task_id(run_id)
+        main = self._main_task_id(run_id)
+        task_id = task_id or main
         task = self._task(task_id, run_id)
         if task["state"] in (TaskState.CLAIMED.value, TaskState.RUNNING.value) and task["owner"] == principal.id:
             claimed = task
         else:
+            self.graph.check_claim(principal, task)
             claimed = self.runtime.claim_task(principal, task_id, expected_version=task["state_version"])["task"]
         if claimed["state"] == TaskState.CLAIMED.value:
             claimed = self.runtime.transition_task(
                 principal, task_id, TaskState.RUNNING, expected_version=claimed["state_version"], fence=self._task_fence(task_id, principal.id), reason="work started"
             )
         run = self.runtime.get_run(CONTROLLER, run_id)
-        if run["lifecycle"] == RunLifecycle.REVIEWING.value:
+        if task_id == main and run["lifecycle"] == RunLifecycle.REVIEWING.value:
             self.runtime.transition_run(CONTROLLER, run_id, RunLifecycle.REPAIRING, reason="writer resumed work")
         self.notify()
         settings = self.settings(run_id)
-        return {
-            "task": _task_view(claimed),
-            "workspace": settings.workspace_path,
-            "base_sha": settings.base_sha,
-            "branch": settings.branch,
-            "rules": (
-                f"Edit files only under {settings.workspace_path}; the user's checkout is not the workspace. "
-                "Call duet_submit when the change is ready; do not edit while checks and review run."
-            ),
-        }
+        view = {"task": _task_view(claimed), "kind": claimed["kind"]}
+        if claimed["kind"] in WRITE_KINDS:
+            view.update(
+                workspace=settings.workspace_path, base_sha=settings.base_sha, branch=settings.branch,
+                rules=(
+                    f"Edit files only under {settings.workspace_path}; the user's checkout is not the workspace. "
+                    + ("Call duet_submit when the change is ready; do not edit while checks and review run." if task_id == main
+                       else "Call duet_complete_task when this part is done; your peer decides whether to accept it.")
+                ),
+            )
+        else:
+            view["rules"] = "Do not edit files. Produce the result (findings, a test plan, a review) and call duet_complete_task with it."
+        return view
 
     def submit(self, principal: Principal, *, task_id: str | None = None, summary: str = "", request_review: bool = True, note: str = "") -> dict:
         self._require_participant(principal)
         run_id = principal.run_id or ""
         check_text(summary, "summary", limit=MAX_TEXT, allow_empty=True)
-        task_id = task_id or self._main_task_id(run_id)
+        main = self._main_task_id(run_id)
+        task_id = task_id or main
+        if task_id != main:
+            raise ValidationError("duet_submit is for the run's main task; finish other tasks with duet_complete_task")
         task = self._task(task_id, run_id)
         if task["owner"] != principal.id or task["state"] != TaskState.RUNNING.value:
             raise InvalidTransition(f"task {task_id} is {task['state']}; claim it with duet_claim before submitting")
@@ -753,6 +782,13 @@ class PairCoordinator:
         snapshot_id = row["snapshot_id"]
         with self._lock:
             self._snapshots[snapshot_id] = snap
+        if snap.changed:
+            self.graph.record_contribution(run_id, principal.id, "code", snapshot_id, f"changed {', '.join(list(snap.changed)[:5])}")
+        # Each submission is its own record: resubmitting an earlier tree (a
+        # revert) makes that snapshot the latest again.
+        with self.runtime.store.transaction() as tx:
+            self.runtime._live_run(tx, run_id)
+            tx.emit(self.runtime._event("task.result", {"result_id": new_id("res"), "task_id": task_id, "run_id": run_id, "author": principal.id, "summary": summary or "submitted", "snapshot_id": snapshot_id}, principal, run_id))
         self.runtime.transition_task(
             principal, task_id, TaskState.REVIEW_REQUIRED, expected_version=task["state_version"],
             fence=self._task_fence(task_id, principal.id), reason=summary or "submitted for review",
@@ -772,6 +808,7 @@ class PairCoordinator:
         if request_review:
             result["review_request"] = self.request_review(principal, snapshot_id=snapshot_id, note=note or summary)
         self.notify()
+        self.graph.observe(run_id, "submission")
         return result
 
     def request_review(self, principal: Principal, *, snapshot_id: str | None = None, note: str = "", criteria: list[str] | None = None) -> dict:
@@ -837,19 +874,39 @@ class PairCoordinator:
         thread = threading.Thread(target=self._run_checks, args=(run_id, snapshot_id, contract, planned), name=f"duet-checks-{snapshot_id[:12]}", daemon=True)
         with self._lock:
             self._checks_running[snapshot_id] = thread
+            self._check_threads[snapshot_id] = thread
         thread.start()
+
+    def wait_for_checks(self, snapshot_id: str, timeout: float = 60.0) -> bool:
+        """Block until the checks for `snapshot_id` and everything that follows
+        from them (status notes, reopening the task, completion, loop control)
+        have finished. True if they finished within `timeout`."""
+        with self._lock:
+            thread = self._check_threads.get(snapshot_id)
+        if thread is None:
+            return True
+        thread.join(timeout)
+        return not thread.is_alive()
 
     def _run_checks(self, run_id: str, snapshot_id: str, contract: AcceptanceContract, action_ids: list[str]) -> None:
         lines = []
         try:
-            ws = self.workspace(run_id)
-            snap = self._snapshots.get(snapshot_id)
+            snap_row = self.evidence.snapshot(snapshot_id)
+            manifest = json.loads(self.artifacts.get_bytes(snap_row["manifest_ref"]).decode("utf-8"))
             for action_id, check_id in zip(action_ids, contract.required_checks()):
-                claimed = self.runtime.claim_action(CONTROLLER, action_id)
+                spec = contract.check(check_id)
+                # The action lease must outlive the check's own timeout.
+                claimed = self.runtime.claim_action(CONTROLLER, action_id, lease_seconds=spec.timeout_seconds + 300)
                 fence = claimed["lease"]["fencing_token"]
                 self.runtime.record_action(CONTROLLER, action_id, ActionState.RUNNING, fence=fence)
                 try:
-                    outcome = run_check(contract.check(check_id), ws.path, snapshot_before=snap, parent_env=self.check_env)
+                    # Checks run on a fresh copy of exactly the snapshot's files,
+                    # never on the live workspace (ignored files, escaping links,
+                    # stale bytecode or concurrent edits cannot influence them).
+                    outcome = run_check_on_snapshot(
+                        spec, manifest, self.artifacts, self.state_root / "checkruns",
+                        expected_tree_hash=snap_row["tree_hash"], parent_env=self.check_env,
+                    )
                     self.evidence.record_check(CONTROLLER, run_id, snapshot_id, contract, outcome)
                 except Exception as exc:  # the outcome is recorded, never lost silently
                     self.runtime.record_action(CONTROLLER, action_id, ActionState.FAILED, fence=fence, result={"error": str(exc)[:2000]})
@@ -872,6 +929,7 @@ class PairCoordinator:
                 if not passed:
                     self._changes_requested(run_id, snapshot_id, "required checks did not pass: " + "; ".join(lines))
                 self.try_complete(run_id)
+                self.graph.observe(run_id, "check")
         except DomainError:
             pass
         self.notify()
@@ -898,6 +956,12 @@ class PairCoordinator:
         peers are stopped after the run lock is released: a peer thread may be
         waiting for that lock."""
         report = self._try_complete_locked(run_id)
+        if report is not None and report.get("stale_snapshot"):
+            # The files changed after submission: the evidence describes a
+            # state that no longer exists. Reopen the task so the writer can
+            # claim it and submit again.
+            self._changes_requested(run_id, report["stale_snapshot"], f"the workspace changed after {report['stale_snapshot']} was submitted; its evidence no longer describes the files. Submit again.")
+            return None
         if report is not None and report.get("outcome") == COMPLETED_VERIFIED and report.get("satisfied"):
             if self.peer_stopper is not None:
                 self.peer_stopper(run_id)
@@ -929,10 +993,7 @@ class PairCoordinator:
             snap = self._snapshots.get(snapshot_id)
             current = capture_snapshot(ws.path, base_sha=ws.base_sha)
             if current.tree_hash != latest["tree_hash"]:
-                writer = self._writer_id(run_id)
-                if writer:
-                    self._status(run_id, writer, f"The workspace changed after {snapshot_id} was submitted; its evidence no longer describes the files. Submit again.", kind=MessageKind.BLOCKER)
-                return None
+                return {"stale_snapshot": snapshot_id}
             snap = snap or current
             task_id = self._main_task_id(run_id)
             task = self._task(task_id, run_id)
@@ -949,10 +1010,14 @@ class PairCoordinator:
                         self._status(run_id, part["participant_id"], f"Not complete yet ({report.outcome}): {missing}")
                 self.notify()
                 return report.to_dict()
-            commit = self._commit_deliverable(run_id, ws, snap, snapshot_id)
+            committed, detail = self._commit_deliverable(run_id, ws, snap, snapshot_id)
             self._release_writer(run_id)
+            delivered = (
+                f"The verified snapshot is committed on branch {ws.branch} as {detail}." if committed
+                else f"The verified snapshot could NOT be committed to {ws.branch} ({detail}); the exported checkpoint holds the verified files and evidence."
+            )
             for part in self.runtime.participants(CONTROLLER, run_id):
-                self._status_terminal(run_id, part["participant_id"], f"COMPLETED_VERIFIED: {snapshot_id} passed every required check and a {self._reviewer_provider(run_id, snapshot_id)} review. Deliverable committed on branch {ws.branch} as {commit}. Nothing was pushed or merged.")
+                self._status_terminal(run_id, part["participant_id"], f"COMPLETED_VERIFIED: {snapshot_id} passed every required check and a {self._reviewer_provider(run_id, snapshot_id)} review. {delivered} Nothing was pushed or merged.")
             self.notify()
             return report.to_dict()
 
@@ -962,23 +1027,61 @@ class PairCoordinator:
         approved = [r["reviewer_provider"] for r in reviews if r["disposition"] == "approve"]
         return approved[-1] if approved else "peer"
 
-    def _commit_deliverable(self, run_id: str, ws: StrictWorkspace, snap: Snapshot, snapshot_id: str) -> str:
-        """Commit the verified snapshot's files to the DUET-owned branch. Only
-        paths the snapshot recorded are staged, so excluded files (secrets)
-        never reach the commit. Nothing is pushed."""
-        paths = list(snap.changed)
-        if not paths:
-            return "(no changes)"
-        subprocess.run(["git", "add", "-A", "--", *paths], cwd=ws.path, check=True, capture_output=True)
-        run = self.runtime.get_run(CONTROLLER, run_id)
-        message = f"duet: {run['objective'][:72]}\n\nDuet-Run: {run_id}\nDuet-Snapshot: {snapshot_id}\n"
-        proc = subprocess.run(
-            ["git", "-c", "user.name=Duet", "-c", "user.email=duet@localhost.invalid", "commit", "-q", "--no-verify", "-m", message],
-            cwd=ws.path, capture_output=True, text=True,
-        )
-        if proc.returncode != 0:
-            return f"(commit failed: {(proc.stderr or proc.stdout).strip()[:200]})"
-        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ws.path, capture_output=True, text=True).stdout.strip()
+    def _commit_deliverable(self, run_id: str, ws: StrictWorkspace, snap: Snapshot, snapshot_id: str) -> tuple[bool, str]:
+        """Commit exactly the verified snapshot to the DUET-owned branch.
+
+        The tree is built from the base commit plus the snapshot's recorded
+        changes, from the stored blobs, in a private index: not from the live
+        worktree (edits after verification cannot slip in) and not on top of
+        whatever the writer may have committed on the branch (work the
+        snapshot does not contain cannot ride along). Excluded files (secrets)
+        are never part of it. Nothing is pushed. Returns (ok, commit or reason)."""
+        row = self.evidence.snapshot(snapshot_id)
+        manifest = json.loads(self.artifacts.get_bytes(row["manifest_ref"]).decode("utf-8"))
+        entries = {item["path"]: item for item in manifest["files"]}
+        changed = list(manifest.get("changed") or snap.changed)
+        if not changed:
+            return True, "(no changes to commit)"
+        index = self.state_root / "runs" / f"{run_id}.index"
+        env = dict(os.environ, GIT_INDEX_FILE=str(index))
+
+        def git(*args: str, data: bytes | None = None) -> str:
+            proc = subprocess.run(["git", *args], cwd=ws.path, env=env, input=data, capture_output=True)
+            if proc.returncode != 0:
+                raise ValidationError(f"git {args[0]} failed: {proc.stderr.decode(errors='replace').strip()[:300]}")
+            return proc.stdout.decode().strip()
+
+        try:
+            git("read-tree", ws.base_sha)
+            for path in changed:
+                item = entries.get(path)
+                if item is None:
+                    git("update-index", "--force-remove", "--", path)
+                    continue
+                if item["mode"] == "160000":
+                    raise ValidationError(f"submodule change {path} cannot be committed from blobs")
+                if not item.get("blob"):
+                    raise ValidationError(f"no stored content for {path}")
+                oid = git("hash-object", "-w", "--stdin", data=self.artifacts.get_bytes(item["blob"]))
+                git("update-index", "--add", "--cacheinfo", f"{item['mode']},{oid},{path}")
+            tree = git("write-tree")
+            head = git("rev-parse", "--verify", f"refs/heads/{ws.branch}")
+            run = self.runtime.get_run(CONTROLLER, run_id)
+            message = f"duet: {run['objective'][:72]}\n\nDuet-Run: {run_id}\nDuet-Snapshot: {snapshot_id}\n"
+            commit = subprocess.run(
+                ["git", "-c", "user.name=Duet", "-c", "user.email=duet@localhost.invalid", "commit-tree", tree, "-p", head, "-m", message],
+                cwd=ws.path, capture_output=True, text=True,
+            )
+            if commit.returncode != 0:
+                raise ValidationError(f"git commit-tree failed: {commit.stderr.strip()[:300]}")
+            oid = commit.stdout.strip()
+            git("update-ref", f"refs/heads/{ws.branch}", oid, head)  # compare-and-swap on the branch
+            subprocess.run(["git", "reset", "-q"], cwd=ws.path, capture_output=True)  # sync the worktree index
+            return True, oid[:12]
+        except ValidationError as exc:
+            return False, exc.message
+        finally:
+            index.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ liveness and lifecycle
 
@@ -1160,9 +1263,17 @@ class PairCoordinator:
             self.workspaces.release_writer(ws, int(row["fencing_token"]))
 
     def _latest_snapshot(self, run_id: str) -> dict | None:
-        rows = self.runtime.store.read().query(
-            "SELECT * FROM snapshots WHERE run_id = ? AND author IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", (run_id,)
+        """The snapshot of the most recent main-task submission (not the most
+        recently *first seen* tree: a revert resubmits an older snapshot id)."""
+        tx = self.runtime.store.read()
+        main = tx.scalar("SELECT task_id FROM tasks WHERE run_id = ? AND proposed_by = 'controller' ORDER BY created_at, rowid LIMIT 1", (run_id,))
+        rows = tx.query(
+            "SELECT s.* FROM task_results r JOIN snapshots s ON s.snapshot_id = r.snapshot_id "
+            "WHERE r.run_id = ? AND r.task_id = ? ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1",
+            (run_id, main),
         )
+        if not rows:
+            rows = tx.query("SELECT * FROM snapshots WHERE run_id = ? AND author IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", (run_id,))
         return dict(rows[0]) if rows else None
 
     def materialized(self, snapshot_id: str) -> Path:
@@ -1215,6 +1326,14 @@ class PairCoordinator:
         os.replace(tmp, path)
         with self._lock:
             self._workspaces[run_id] = ws
+
+    def _set_writer_provider(self, run_id: str, provider: str) -> None:
+        settings = self.settings(run_id)
+        settings.writer_provider = provider
+        path = self._settings_path(run_id)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(settings.to_dict(), indent=2), encoding="utf-8")
+        os.replace(tmp, path)
 
     def settings(self, run_id: str) -> PairSettings:
         path = self._settings_path(run_id)
@@ -1295,7 +1414,7 @@ def _peer_view(peer: dict | None) -> dict | None:
 
 
 def _task_view(task: dict) -> dict:
-    return {k: task[k] for k in ("task_id", "description", "state", "owner", "required", "revision", "state_version") if k in task}
+    return {k: task[k] for k in ("task_id", "kind", "description", "state", "owner", "required", "revision", "state_version") if k in task}
 
 
 def _message_view(message: dict) -> dict:

@@ -619,8 +619,13 @@ class Runtime:
         depends_on: list[str] | None = None,
         parent_id: str | None = None,
         required: bool | None = None,
+        kind: str = "code",
         idempotency_key: str | None = None,
     ) -> dict:
+        from .taskplan import TASK_KINDS
+
+        if kind not in TASK_KINDS:
+            raise ValidationError(f"task kind must be one of {TASK_KINDS}")
         if principal.is_participant:
             run_id = principal.run_id
         elif principal.kind not in ("user", "controller"):
@@ -635,6 +640,7 @@ class Runtime:
         request = {
             "run_id": run_id, "description": description, "deliverables": deliverables,
             "acceptance_ids": acceptance_ids, "depends_on": depends_on, "parent_id": parent_id, "required": required,
+            "kind": kind,
         }
 
         def run(tx: Tx) -> dict:
@@ -661,7 +667,7 @@ class Runtime:
                     {
                         "task_id": task_id, "run_id": run_id, "parent_id": parent_id, "description": description,
                         "deliverables": deliverables, "acceptance_ids": acceptance_ids, "depends_on": depends_on,
-                        "required": is_required, "state": state.value, "proposed_by": principal.id,
+                        "required": is_required, "state": state.value, "proposed_by": principal.id, "kind": kind,
                     },
                     principal,
                     run_id,

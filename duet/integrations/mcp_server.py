@@ -31,6 +31,7 @@ from ..runtime.paths import ensure_private_dir
 from ..runtime.service import ServiceClient, ServicePaths, ensure_service
 
 SERVER_NAME = "duet"
+FINISHED = frozenset({"COMPLETED_VERIFIED", "FAILED", "CANCELLED"})
 MCP_REQUIREMENT = "mcp>=2.2,<3"
 
 
@@ -53,16 +54,37 @@ class ProxySession:
         return ensure_private_dir(self.paths.root / "sessions") / (hashlib.sha256(self.host.encode()).hexdigest()[:32] + ".json")
 
     def restore(self) -> None:
-        """Reconnect a native session whose MCP server restarted."""
+        """Reconnect a native session whose MCP server restarted, unless its
+        run has already ended (then the session starts fresh)."""
         path = self._session_file()
         if self.token or path is None or not path.exists():
             return
         try:
             token = json.loads(path.read_text(encoding="utf-8"))["token"]
-            self._client(token).call("status", rpc_timeout=15.0)
+            status = self._client(token).call("status", rpc_timeout=15.0)
+            if status.get("lifecycle") in FINISHED:
+                path.unlink(missing_ok=True)
+                return
             self.token = token
         except (DomainError, KeyError, ValueError, OSError) as exc:
             if isinstance(exc, (Unauthorized, NotFound, KeyError, ValueError)):
+                path.unlink(missing_ok=True)
+
+    def _forget_finished_run(self) -> None:
+        """A session may start a new run once its previous one has ended."""
+        if not self.token or self.managed:
+            return
+        try:
+            status = self._client(self.token).call("status", rpc_timeout=15.0)
+            finished = status.get("lifecycle") in FINISHED
+        except (Unauthorized, NotFound):
+            finished = True
+        if finished:
+            self.token = None
+            self.last_seq = None
+            self.watch = None
+            path = self._session_file()
+            if path is not None:
                 path.unlink(missing_ok=True)
 
     def _remember(self, token: str) -> None:
@@ -88,6 +110,8 @@ class ProxySession:
 
     def join(self, **args: Any) -> dict:
         with self._lock:
+            if self.token and (args.get("objective") or args.get("run_id")):
+                self._forget_finished_run()
             if self.token:
                 return self.call("join", provider=args.get("provider"), **{k: args.get(k) for k in ("objective", "run_id", "invite")})
             if self.managed:
@@ -197,16 +221,45 @@ def build_server(session: ProxySession):
     async def duet_wait(timeout: float = DEFAULT_WAIT_SECONDS, ack_through: int | None = None) -> dict[str, Any]:
         return await run(session.wait, timeout, ack_through)
 
-    @server.tool(description="Propose a bounded subtask. DUET validates it; tasks tied to acceptance criteria are required.")
-    async def duet_propose_task(description: str, depends_on: list[str] | None = None, acceptance_ids: list[str] | None = None) -> dict[str, Any]:
-        return await run(session.call, "propose_task", description=description, depends_on=depends_on, acceptance_ids=acceptance_ids)
+    @server.tool(description=(
+        "Propose one bounded subtask (a one-task plan). kind: code (writer only), investigate, test_design or review. "
+        "Your peer must accept it (duet_decide_plan) before it exists. Tasks tied to acceptance criteria are required."
+    ))
+    async def duet_propose_task(description: str, kind: str = "investigate", depends_on: list[str] | None = None, acceptance_ids: list[str] | None = None) -> dict[str, Any]:
+        return await run(session.call, "propose_task", description=description, kind=kind, depends_on=depends_on, acceptance_ids=acceptance_ids)
 
-    @server.tool(description="Writer only: claim the task (default: the run's main task) and get the workspace path to edit.")
+    @server.tool(description=(
+        "Propose a plan: up to 12 tasks, each {key, description, kind: code|investigate|test_design|review, depends_on: [keys or task ids], "
+        "acceptance_ids, parent}. It only adds tasks; the objective and acceptance contract cannot change. Your peer accepts or rejects it."
+    ))
+    async def duet_propose_plan(tasks: list[dict[str, Any]], rationale: str = "") -> dict[str, Any]:
+        return await run(session.call, "propose_plan", tasks=tasks, rationale=rationale)
+
+    @server.tool(description="Accept or reject your peer's plan (decision: accept|reject), or withdraw your own (withdraw).")
+    async def duet_decide_plan(plan_id: str, decision: str, reason: str = "") -> dict[str, Any]:
+        return await run(session.call, "decide_plan", plan_id=plan_id, decision=decision, reason=reason)
+
+    @server.tool(description=(
+        "Claim a ready task (default: the run's main task). Code tasks belong to the writer and return the workspace path; "
+        "other kinds can be claimed by either participant. duet_status 'next' shows what DUET suggests for you."
+    ))
     async def duet_claim(task_id: str | None = None) -> dict[str, Any]:
         return await run(session.call, "claim", task_id=task_id)
 
+    @server.tool(description="Finish a task you own (not the main task: use duet_submit for that) with a summary and optional result text. Your peer decides whether to accept it.")
+    async def duet_complete_task(task_id: str, summary: str, artifact: str | None = None) -> dict[str, Any]:
+        return await run(session.call, "complete_task", task_id=task_id, summary=summary, artifact=artifact)
+
+    @server.tool(description="Accept or reject your peer's finished task (decision: accept|reject) with a reason. A rejection sends it back for rework.")
+    async def duet_decide_task(task_id: str, decision: str, reason: str = "") -> dict[str, Any]:
+        return await run(session.call, "decide_task", task_id=task_id, decision=decision, reason=reason)
+
+    @server.tool(description="Move the writer role: the writer hands it to the peer, or the reviewer takes it over when the writer is unavailable.")
+    async def duet_handoff(reason: str = "") -> dict[str, Any]:
+        return await run(session.call, "handoff", reason=reason)
+
     @server.tool(description=(
-        "Writer only: snapshot the workspace for review. DUET runs the acceptance checks on that exact snapshot and, "
+        "Writer only, main task: snapshot the workspace for review. DUET runs the acceptance checks on that exact snapshot and, "
         "unless request_review is false, asks your peer to review it. This does not certify completion."
     ))
     async def duet_submit(summary: str = "", task_id: str | None = None, request_review: bool = True, note: str = "") -> dict[str, Any]:
@@ -220,7 +273,7 @@ def build_server(session: ProxySession):
     async def duet_request_profile(model: str | None = None, effort: str | None = None, reason: str = "") -> dict[str, Any]:
         return await run(session.call, "request_profile", model=model, effort=effort, reason=reason)
 
-    @server.tool(description="Run status: participants and their delivery modes, tasks, open requests, checks, reviews and what completion still needs.")
+    @server.tool(description="Run status: participants and delivery modes, tasks, plans, contributions, open requests, checks, reviews, what completion still needs, and 'next': what DUET suggests you do.")
     async def duet_status() -> dict[str, Any]:
         return await run(session.call, "status")
 

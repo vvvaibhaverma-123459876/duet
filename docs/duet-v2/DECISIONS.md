@@ -225,3 +225,49 @@ Codex send) was checked against the server directly.
   merged.
 - Overdue runs pause (`PAUSED_BUDGET`) and their managed peers stop. A paused
   run does not keep the service alive.
+
+## D-020: Shared task graph (D06)
+
+- The scheduler (`runtime/scheduler.py`) is a pure function of a
+  `GraphState` snapshot: no database, clock or randomness. It holds no
+  authority; the coordinator turns its answers into commands.
+- Plans are shared. One participant proposes (at most 12 tasks, one pending
+  plan per run); the other accepts or rejects; the proposer may withdraw. A
+  plan only adds tasks. It cannot change the objective, the acceptance
+  contract or existing tasks. `duet_propose_task` is a one-task plan.
+- Bounds: 32 tasks per run, 3 ancestors per task, 2 active claims per
+  participant. Proposals create tasks, never agents.
+- Task kinds: `code` (the single writer only, until parallel workspaces in
+  D11), and `investigate`, `test_design`, `review` (either participant).
+  A finished non-main task goes to the other participant for acceptance; the
+  controller then marks it VERIFIED. The main task keeps DUET's checks plus
+  a cross-provider snapshot review.
+- `CHANGES_REQUESTED` work is reclaimed by its owner (for code, the current
+  writer), not by the other participant.
+
+## D-021: Contributions from evidence only (D06)
+
+A contribution record is written by the controller only from evidence: an
+authored snapshot with changes (`code`), a review of an exact snapshot or a
+decision on a task result (`review`), an accepted task result (its kind), or
+an accepted plan (`plan`). Ids are derived from (run, participant, kind,
+ref), so nothing counts twice. The completion gate's `both_contributions`
+item uses snapshots, reviews and these records; message counts no longer
+count (R01). This tightens the D03 gate.
+
+## D-022: Loop control (D06)
+
+- Progress is a fingerprint of task states and revisions, snapshot trees,
+  check results and open findings. Message text never changes it.
+- Repeated failed hypotheses (failed required checks, blocking reviews,
+  rejected results; `max_repair_attempts`, default 2, of the same failure,
+  or one more of any kind) block the task and ask for a re-plan. The task
+  unblocks only when the other participant accepts a new plan. The same
+  after a re-plan pauses the run (`PAUSED_APPROVAL`): the user decides.
+- Twelve peer messages without a fingerprint change are a stall: both
+  participants get a BLOCKER. If the stall continues for another window, the
+  run pauses. Samples live in the service's memory, so a restart resets the
+  stall window, but not the failure history, which is read from the store.
+- The role of writer moves by `duet_handoff`: the writer hands it over, or
+  the reviewer takes it over when the writer is unavailable. The outgoing
+  writer's active code tasks return to READY.

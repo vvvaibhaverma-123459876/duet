@@ -461,6 +461,94 @@ class TestManagedPeer:
             service.close()
 
 
+class TestReviewFixes:
+    def test_driver_survives_the_model_acknowledging_further(self, paths, tmp_path):
+        def codex(tools, request):
+            for mid in message_ids(request.prompt, "QUESTION"):
+                got = tools.call("wait", timeout=0)
+                tools.call("inbox", ack_through=got["last_seq"])  # as the instructions say
+                tools.call("send", kind="ANSWER", body="yes", reply_to=mid)
+            return "answered"
+
+        peers = {}
+        service = start(paths, peer_factory=factory_for({"codex": codex}, peers))
+        try:
+            repo = make_repo(tmp_path / "repo")
+            client = ServiceClient(paths)
+            me = client.with_token(client.call("join", provider="claude", objective="x", repo=str(repo), checks=[CHECK], peer="managed")["token"])
+            for n in range(2):
+                q = me.call("send", kind="QUESTION", body=f"question {n}")
+                assert wait_until(lambda: any(m["reply_to"] == q["message_id"] for m in me.call("inbox")["messages"]), 20), n
+            peer, adapter = peers["codex"]
+            assert peer.alive and len(adapter.requests) == 2
+            assert me.call("status")["collaboration"] == "PAIR_ACTIVE"
+        finally:
+            service.close()
+
+    def test_restart_marks_orphaned_managed_peers_unavailable(self, paths, tmp_path):
+        peers = {}
+        service = start(paths, peer_factory=factory_for({"codex": lambda tools, request: ""}, peers))
+        repo = make_repo(tmp_path / "repo")
+        client = ServiceClient(paths)
+        joined = client.call("join", provider="claude", objective="x", repo=str(repo), checks=[CHECK], peer="managed")
+        service.close()
+        service = start(paths)  # a restart: nobody drives the managed codex any more
+        try:
+            me = client.with_token(joined["token"])
+            status = me.call("status")
+            codex = next(p for p in status["participants"] if p["provider"] == "codex")
+            assert codex["liveness"] == "unavailable" and status["collaboration"] == "PEER_UNAVAILABLE"
+            notes = [m["body"] for m in me.call("inbox")["messages"]]
+            assert any("unavailable" in n and ("service stopped" in n or "service restarted" in n) for n in notes), notes
+        finally:
+            service.close()
+
+    def test_interrupted_check_reopens_the_task(self, paths, tmp_path):
+        from duet.runtime.store import Store
+
+        service = start(paths)
+        repo = make_repo(tmp_path / "repo")
+        client = ServiceClient(paths)
+        started = client.call("join", provider="claude", objective="x", repo=str(repo), checks=[CHECK], peer="invite")
+        client.call("join", provider="codex", run_id=started["run_id"], invite=started["invite"]["code"])
+        me = client.with_token(started["token"])
+        claimed = me.call("claim")
+        Path(claimed["workspace"], "calc.py").write_text(MUL)
+        submitted = me.call("submit", request_review=False)
+        assert service.coordinator.wait_for_checks(submitted["snapshot_id"], 60)
+        action = service.runtime.plan_action(CONTROLLER, run_id=started["run_id"], type="check", input={"check_id": "check1"})["action"]["action_id"]
+        service.runtime.claim_action(CONTROLLER, action)
+        service.close()
+        store = Store(paths.db)
+        store.connection().execute("UPDATE leases SET owner = ? WHERE resource = ?", (dead_host(), f"action:{action}"))
+        store.close()
+        service = start(paths)
+        try:
+            main = me.call("status")["tasks"][0]
+            assert main["state"] == "CHANGES_REQUESTED"
+            assert any("interrupted by a service restart" in m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "BLOCKER")
+            me.call("claim")  # the writer can act on "submit again"
+        finally:
+            service.close()
+
+    def test_a_native_session_can_start_a_new_run_after_its_run_ends(self, paths, tmp_path):
+        from duet.integrations.mcp_server import ProxySession
+
+        service = start(paths)
+        try:
+            repo = make_repo(tmp_path / "repo")
+            session = ProxySession(paths, host=live_host())
+            first = session.join(provider="claude", objective="first", repo=str(repo), checks=[" ".join(CHECK)], peer="invite")
+            ServiceClient.as_controller(paths).call("cancel", run_id=first["run_id"], reason="done with it")
+            second = session.join(provider="claude", objective="second", repo=str(repo), checks=[" ".join(CHECK)], peer="invite")
+            assert second["run_id"] != first["run_id"] and second["objective"] == "second"
+            restarted = ProxySession(paths, host=live_host())
+            restarted.restore()
+            assert restarted.token == session.token  # the live run is reconnected, not the finished one
+        finally:
+            service.close()
+
+
 # --- no recursion -------------------------------------------------------------------------
 
 

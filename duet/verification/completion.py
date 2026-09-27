@@ -26,7 +26,6 @@ from ..runtime.contracts import (
     ActionState,
     Collaboration,
     InvalidTransition,
-    MessageKind,
     Principal,
     RunLifecycle,
     TaskState,
@@ -40,7 +39,6 @@ from ..workspaces.snapshots import Snapshot, protected_changes
 from .acceptance import AcceptanceContract
 from .evidence import EvidenceService
 
-SUBSTANTIVE_MESSAGES = (MessageKind.FINDING.value, MessageKind.ANSWER.value, MessageKind.REVIEW_RESULT.value, MessageKind.PLAN_PROPOSAL.value)
 UNOBSERVED_ACTION_STATES = (ActionState.DISPATCHING.value, ActionState.RUNNING.value, ActionState.IN_DOUBT.value)
 
 COMPLETED_VERIFIED = "COMPLETED_VERIFIED"
@@ -171,9 +169,10 @@ class CompletionGate:
             contributed.add(participants.get(row["author"], ""))
         for row in tx.query("SELECT DISTINCT reviewer_provider FROM reviews WHERE run_id = ?", (run["run_id"],)):
             contributed.add(row["reviewer_provider"])
-        kinds = ",".join("?" * len(SUBSTANTIVE_MESSAGES))
-        for row in tx.query(f"SELECT DISTINCT sender FROM messages WHERE run_id = ? AND kind IN ({kinds})", (run["run_id"], *SUBSTANTIVE_MESSAGES)):
-            contributed.add(participants.get(row["sender"], ""))
+        # Contribution records come only from evidence (accepted task results,
+        # accepted plans, authored changes, reviews); messages never count (R01).
+        for row in tx.query("SELECT DISTINCT provider FROM contributions WHERE run_id = ?", (run["run_id"],)):
+            contributed.add(row["provider"])
         providers = set(participants.values())
         needed = {"claude", "codex"}
         missing_participants = needed - providers
@@ -181,7 +180,7 @@ class CompletionGate:
             return PredicateItem("both_contributions", False, f"no registered {', '.join(sorted(missing_participants))} participant")
         missing = needed - contributed
         if missing:
-            return PredicateItem("both_contributions", False, f"no substantive contribution evidenced from {', '.join(sorted(missing))}")
+            return PredicateItem("both_contributions", False, f"no substantive contribution evidenced from {', '.join(sorted(missing))} (messages alone do not count)")
         return PredicateItem("both_contributions", True, "claude and codex both contributed")
 
     def _scope(self, tx, run: dict, snap: dict, contract: AcceptanceContract, workspace: Path | None, snapshot: Snapshot | None) -> PredicateItem:

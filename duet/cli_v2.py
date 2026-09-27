@@ -118,7 +118,20 @@ def format_status(status: dict) -> str:
             f"receive={caps['receive']} identity={caps['native_identity']} containment={caps['containment']}"
         )
     for task in status["tasks"]:
-        lines.append(f"  task {task['task_id']}: {task['state']}{' (required)' if task['required'] else ''} - {task['description'][:70]}")
+        owner = next((p["provider"] for p in status["participants"] if p["participant_id"] == task["owner"]), None)
+        lines.append(
+            f"  task {task['task_id']} [{task.get('kind', 'code')}]: {task['state']}{' (required)' if task['required'] else ''}"
+            + (f" owner={owner}" if owner else "") + f" - {task['description'][:70]}"
+        )
+    for plan in status.get("plans", []):
+        lines.append(f"  plan {plan['plan_id']}: {plan['state']} ({plan['tasks']} task(s))")
+    if status.get("contributions"):
+        by_provider: dict[str, list[str]] = {}
+        for c in status["contributions"]:
+            by_provider.setdefault(c["provider"], []).append(c["kind"])
+        lines.append("  contributions (from evidence): " + "; ".join(f"{p}: {', '.join(sorted(set(k)))}" for p, k in sorted(by_provider.items())))
+    for item in status.get("interventions", []):
+        lines.append(f"  intervention {item['status']}: {item['reason'][:120]}")
     ver = status["verification"]
     if ver.get("snapshot_id"):
         lines.append(f"  latest snapshot {ver['snapshot_id']}: changed {', '.join(ver['changed']) or '(none)'}")

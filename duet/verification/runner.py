@@ -11,12 +11,17 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..providers.process import run_bounded
+from ..runtime.artifacts import ArtifactStore
 from ..runtime.contracts import content_hash, utc_now
-from ..workspaces.snapshots import Snapshot, capture_snapshot
+from ..runtime.paths import ensure_private_dir
+from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
 from .acceptance import CheckSpec
 
 BASE_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM", "SYSTEMROOT", "COMSPEC")
@@ -98,7 +103,9 @@ def run_check(
         status, detail = "passed", "exit 0"
     else:
         status, detail = "failed", f"exit {proc.returncode}"
-    if _no_tests(proc.returncode, output) and not proc.timed_out:
+    # The no-tests policy applies only when the run itself did not fail:
+    # "no test files" in one package must not hide a failure in another.
+    if not proc.timed_out and proc.returncode in (0, PYTEST_NO_TESTS_EXIT) and _no_tests(proc.returncode, output):
         status = {"unknown": "unknown", "fail": "failed", "pass": "passed"}[spec.no_tests]
         detail = f"no tests were collected (policy: {spec.no_tests})"
     if after.tree_hash != before.tree_hash:
@@ -106,6 +113,39 @@ def run_check(
         status = "invalidated"
         detail = f"inputs changed while the check ran: {', '.join(changed[:10])}{' ...' if len(changed) > 10 else ''}"
     return _outcome(spec, status, proc.returncode, output, fingerprint, before.tree_hash, after.tree_hash, detail, started, ended)
+
+
+def run_check_on_snapshot(
+    spec: CheckSpec,
+    manifest: dict,
+    store: ArtifactStore,
+    scratch_root: Path | str,
+    *,
+    expected_tree_hash: str,
+    parent_env: dict[str, str] | None = None,
+) -> CheckOutcome:
+    """Run a check on a fresh copy of exactly the snapshot's files.
+
+    The live workspace can hold things the snapshot deliberately left out
+    (ignored files, links that escape, stale bytecode) and can change while a
+    check runs. A private copy built from the stored blobs has neither
+    problem: if the copy does not reproduce the snapshot's tree hash, the
+    check is not run and the outcome is `unknown`."""
+    scratch = Path(tempfile.mkdtemp(prefix=f"check-{spec.id}-", dir=ensure_private_dir(Path(scratch_root))))
+    try:
+        root = scratch / "tree"
+        try:
+            materialize(manifest, store, root)
+        except Exception as exc:  # a snapshot that cannot be rebuilt cannot be verified
+            return _outcome(spec, "unknown", None, "", "", expected_tree_hash, expected_tree_hash, f"snapshot could not be materialised: {exc}", "", "")
+        for argv in (["init", "-q"], ["add", "-A"], ["-c", "user.name=duet", "-c", "user.email=duet@localhost.invalid", "commit", "-q", "--no-verify", "--allow-empty", "-m", "snapshot"]):
+            subprocess.run(["git", *argv], cwd=root, capture_output=True, check=False)
+        before = capture_snapshot(root)
+        if before.tree_hash != expected_tree_hash:
+            return _outcome(spec, "unknown", None, "", "", expected_tree_hash, before.tree_hash, "the materialised copy does not reproduce the snapshot (e.g. submodules); check not run", "", "")
+        return run_check(spec, root, snapshot_before=before, parent_env=parent_env)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _no_tests(returncode: int | None, output: str) -> bool:

@@ -89,3 +89,39 @@ def test_duet_pair_with_emulated_managed_sessions(tmp_path):
     finally:
         if service_running(paths):
             ServiceClient.as_controller(paths).call("shutdown")
+
+
+def test_duet_pair_shares_a_plan_and_both_contribute(tmp_path):
+    """D06 through the full path: the managed writer proposes a plan giving
+    the reviewer an investigation task; the reviewer accepts the plan, is
+    routed the task by the scheduler, completes it; the writer accepts the
+    result, implements, and the reviewer approves the snapshot."""
+    repo = make_repo(tmp_path / "repo")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    state = tmp_path / "state"
+    env = dict(
+        os.environ, DUET_STATE_DIR=str(state),
+        DUET_CLAUDE_BIN=str(shim(bin_dir, "claude", "fake_claude.py")), DUET_CODEX_BIN=str(shim(bin_dir, "codex", "fake_codex_appserver.py")),
+        FAKE_CLAUDE_MODE="peer", FAKE_CODEX_MODE="peer", FAKE_BRAIN_MODE="plan", FAKE_BRAIN_STATE=str(tmp_path / "brain"),
+    )
+    env.pop("DUET_MANAGED_PEER", None)
+    paths = ServicePaths.for_root(state / "v2")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "duet", "pair", "add mul(a, b) to calc.py", "--repo", str(repo), "--check", f'"{PY}" check_feature.py', "--json"],
+            env=env, capture_output=True, text=True, timeout=300, cwd=tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr[-3000:] + proc.stdout[-3000:]
+        status = json.loads(proc.stdout)
+        assert status["lifecycle"] == "COMPLETED_VERIFIED"
+        kinds = {(c["provider"], c["kind"]) for c in status["contributions"]}
+        assert {("claude", "plan"), ("claude", "code"), ("codex", "investigate"), ("codex", "review")} <= kinds, kinds
+        tasks = {t["kind"]: t for t in status["tasks"]}
+        assert tasks["investigate"]["state"] == "VERIFIED" and tasks["code"]["state"] == "VERIFIED"
+        owners = {p["participant_id"]: p["provider"] for p in status["participants"]}
+        assert owners[tasks["investigate"]["owner"]] == "codex" and owners[tasks["code"]["owner"]] == "claude"  # no duplicated work
+        assert status["plans"][0]["state"] == "ACCEPTED" and status["interventions"] == []
+    finally:
+        if service_running(paths):
+            ServiceClient.as_controller(paths).call("shutdown")

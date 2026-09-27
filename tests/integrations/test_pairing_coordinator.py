@@ -333,7 +333,7 @@ class TestReviewedPatch:
         with pytest.raises(Unauthorized, match="cannot review"):
             co.send(writer, kind="REVIEW_RESULT", body="lgtm", snapshot_id=snapshot_id, review={"disposition": "approve"})
 
-        assert wait_for(lambda: snapshot_id not in co._checks_running)
+        assert co.wait_for_checks(snapshot_id)
         co.send(reviewer, kind="REVIEW_RESULT", body="Correct and minimal.", reply_to=request["message_id"], review={"disposition": "approve"})
         assert wait_for(lambda: pair.lifecycle() == "COMPLETED_VERIFIED"), co.run_status(pair.run_id)["verification"]
 
@@ -355,7 +355,7 @@ class TestReviewedPatch:
         path = co.workspace(pair.run_id).path / "calc.py"
         path.write_text(BROKEN_MUL)
         first = co.submit(writer, summary="first try")["snapshot_id"]
-        assert wait_for(lambda: first not in co._checks_running)
+        assert co.wait_for_checks(first)
         assert co.runtime.tasks(CONTROLLER, pair.run_id)[0]["state"] == "CHANGES_REQUESTED"  # the check failed
         assert pair.lifecycle() == "REPAIRING"
         review = co.send(reviewer, kind="REVIEW_RESULT", body="mul adds instead of multiplying", snapshot_id=first,
@@ -366,7 +366,7 @@ class TestReviewedPatch:
         assert pair.lifecycle() == "REPAIRING"
         path.write_text(MUL)
         second = co.submit(writer, summary="fixed")["snapshot_id"]
-        assert wait_for(lambda: second not in co._checks_running)
+        assert co.wait_for_checks(second)
         with pytest.raises(Unauthorized):  # the author cannot close the reviewer's finding
             co.evidence.resolve_finding(writer, finding, resolution="fixed")
         assert pair.lifecycle() != "COMPLETED_VERIFIED"
@@ -379,12 +379,12 @@ class TestReviewedPatch:
         path = co.workspace(pair.run_id).path / "calc.py"
         path.write_text(MUL)
         first = co.submit(writer)["snapshot_id"]
-        assert wait_for(lambda: first not in co._checks_running)
+        assert co.wait_for_checks(first)
         co.send(reviewer, kind="REVIEW_RESULT", body="nit: add a docstring", snapshot_id=first, review={"disposition": "changes_requested"})
         co.claim(writer)
         path.write_text(MUL + "\n# docstring pending\n")
         second = co.submit(writer)["snapshot_id"]
-        assert wait_for(lambda: second not in co._checks_running)
+        assert co.wait_for_checks(second)
         co.send(reviewer, kind="REVIEW_RESULT", body="fine", snapshot_id=first, review={"disposition": "approve"})
         time.sleep(0.2)
         assert pair.lifecycle() != "COMPLETED_VERIFIED"
@@ -397,7 +397,7 @@ class TestReviewedPatch:
         path = co.workspace(pair.run_id).path / "calc.py"
         path.write_text(MUL)
         snap = co.submit(writer)["snapshot_id"]
-        assert wait_for(lambda: snap not in co._checks_running)
+        assert co.wait_for_checks(snap)
         path.write_text(MUL + "# sneaky\n")
         co.send(reviewer, kind="REVIEW_RESULT", body="ok", snapshot_id=snap, review={"disposition": "approve"})
         time.sleep(0.2)
@@ -409,6 +409,6 @@ class TestReviewedPatch:
         co.claim(pair.claude)
         (co.workspace(pair.run_id).path / "calc.py").write_text(MUL)
         snap = co.submit(pair.claude)["snapshot_id"]
-        assert wait_for(lambda: snap not in co._checks_running)
+        assert co.wait_for_checks(snap)
         actions = co.runtime.store.read().query("SELECT type, state, result_json FROM actions WHERE run_id = ?", (pair.run_id,))
         assert [(a["type"], a["state"]) for a in actions] == [("check", "SUCCEEDED")]

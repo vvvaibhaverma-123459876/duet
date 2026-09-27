@@ -19,8 +19,9 @@ from pairkit import MUL, PY, make_repo  # noqa: E402
 from duet.runtime.service import ServiceClient, ServicePaths, service_running  # noqa: E402
 
 TOOLS = {
-    "duet_join", "duet_send", "duet_inbox", "duet_wait", "duet_propose_task", "duet_claim", "duet_submit",
-    "duet_request_review", "duet_request_profile", "duet_status",
+    "duet_join", "duet_send", "duet_inbox", "duet_wait", "duet_propose_task", "duet_propose_plan", "duet_decide_plan",
+    "duet_claim", "duet_complete_task", "duet_decide_task", "duet_handoff", "duet_submit", "duet_request_review",
+    "duet_request_profile", "duet_status",
 }
 
 

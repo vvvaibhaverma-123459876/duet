@@ -31,6 +31,7 @@ SENSITIVE_NAME_PATTERNS = (
     ".env", ".env.*", "*.env", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore", "id_rsa*", "id_dsa*",
     "id_ecdsa*", "id_ed25519*", ".npmrc", ".pypirc", ".netrc", ".git-credentials", "credentials", "credentials.*",
     "*.kdbx", "secrets.*", "*.secret", "*.secrets", "service-account*.json", ".htpasswd", "*.tfstate", "*.tfvars",
+    "*.tfstate.*", ".envrc", ".pgpass", ".vault-token", "kubeconfig", "*.kubeconfig", ".dockercfg", ".boto", ".s3cfg",
 )
 SENSITIVE_DIRS = (".ssh", ".aws", ".gnupg", ".docker", ".kube", ".azure", ".config/gcloud")
 TRANSIENT_PATTERNS = (
@@ -182,6 +183,9 @@ def capture_snapshot(
                 continue
             digest = "sha256:" + hashlib.sha256(target.encode("utf-8", errors="surrogateescape")).hexdigest()
             files.append(FileEntry(path, "120000", digest, len(target)))
+            if store is not None:
+                # Keep the link text so a materialised copy can recreate it.
+                blobs[path] = store.put_bytes(target.encode("utf-8", errors="surrogateescape"))
             continue
         if stat.S_ISDIR(info.st_mode):
             continue  # an untracked directory entry (nested repo); its files are listed individually
@@ -251,6 +255,16 @@ def _changed_paths(root: Path, base_sha: str, files: list[FileEntry]) -> list[st
     return sorted(changed)
 
 
+def matches_protected(path: str, pattern: str) -> bool:
+    """A protected pattern is a glob (`tests/*`), a file (`check.py`) or a
+    directory given with or without a trailing slash (`tests`, `tests/`),
+    which covers everything below it."""
+    if fnmatch.fnmatch(path, pattern):
+        return True
+    bare = pattern.rstrip("/")
+    return bool(bare) and not any(ch in bare for ch in "*?[") and (path == bare or path.startswith(bare + "/"))
+
+
 def protected_changes(snapshot: Snapshot, workspace: Path, base_sha: str | None, patterns: tuple[str, ...] | list[str]) -> list[str]:
     """Paths matching `patterns` whose content differs from `base_sha`
     (modified, added or deleted). Used to stop agents from weakening the
@@ -261,16 +275,19 @@ def protected_changes(snapshot: Snapshot, workspace: Path, base_sha: str | None,
     current = {f.path: (f.mode, f.sha256) for f in snapshot.files}
     hits = []
     for path in sorted(set(base) | set(current)):
-        if any(fnmatch.fnmatch(path, pattern) for pattern in patterns) and base.get(path) != current.get(path):
+        if any(matches_protected(path, pattern) for pattern in patterns) and base.get(path) != current.get(path):
             hits.append(path)
     return hits
 
 
-def materialize(manifest: dict, store: ArtifactStore, dest: Path) -> Path:
-    """Write a snapshot's files into `dest` read-only, so a reviewer inspects
-    an immutable copy rather than files changing underneath it."""
+def materialize(manifest: dict, store: ArtifactStore, dest: Path, *, recreate_links: bool = True) -> Path:
+    """Write a snapshot's files into `dest` read-only, so a reviewer (or a
+    check) sees an immutable copy rather than files changing underneath it.
+    In-tree symlinks are recreated when their text was stored; a link that
+    would point outside `dest` is refused."""
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=False)
+    links = []
     for item in manifest["files"]:
         rel = PurePosixPath(item["path"])
         if rel.is_absolute() or ".." in rel.parts:
@@ -280,11 +297,17 @@ def materialize(manifest: dict, store: ArtifactStore, dest: Path) -> Path:
         if item["mode"] == "160000":
             continue
         if item["mode"] == "120000":
-            continue  # links are recorded by hash only; not recreated
+            if recreate_links and item.get("blob"):
+                links.append((target, store.get_bytes(item["blob"]).decode("utf-8", errors="surrogateescape")))
+            continue
         if not item.get("blob"):
             raise ValidationError(f"snapshot has no stored content for {item['path']}")
         target.write_bytes(store.get_bytes(item["blob"]))
         os.chmod(target, 0o555 if item["mode"] == "100755" else 0o444)
+    for target, text in links:
+        if os.path.isabs(text) or not _inside(dest, target.parent / text):
+            raise ValidationError(f"snapshot link {target.relative_to(dest)} points outside the snapshot")
+        os.symlink(text, target)
     return dest
 
 

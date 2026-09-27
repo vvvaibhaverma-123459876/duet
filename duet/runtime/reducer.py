@@ -55,7 +55,7 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
         (
             "task_id", "run_id", "parent_id", "description", "deliverables_json", "acceptance_ids_json",
             "depends_on_json", "required", "revision", "owner", "state", "blocked_reason", "next_action",
-            "attempts", "proposed_by", "state_version", "created_at", "updated_at",
+            "attempts", "proposed_by", "state_version", "created_at", "updated_at", "kind",
         ),
     ),
     "messages": (
@@ -122,6 +122,23 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     "invites": (
         "invite_id",
         ("invite_id", "run_id", "provider", "code_hash", "created_by", "expires_at", "used_by", "used_at", "created_at"),
+    ),
+    # D06: task graph (migration 0004)
+    "plans": (
+        "plan_id",
+        ("plan_id", "run_id", "proposer", "rationale", "tasks_json", "state", "decided_by", "decision_reason", "created_task_ids_json", "created_at", "updated_at"),
+    ),
+    "task_results": (
+        "result_id",
+        ("result_id", "task_id", "run_id", "author", "summary", "artifact_ref", "snapshot_id", "decision", "decided_by", "decision_reason", "created_at", "updated_at"),
+    ),
+    "contributions": (
+        "contribution_id",
+        ("contribution_id", "run_id", "participant_id", "provider", "kind", "ref", "summary", "created_at"),
+    ),
+    "interventions": (
+        "intervention_id",
+        ("intervention_id", "run_id", "status", "task_id", "reason", "evidence_json", "fingerprint", "created_at"),
     ),
 }
 REPLAYED_TABLES = tuple(TABLES)
@@ -359,6 +376,7 @@ def _task_proposed(p: dict, e: Event, get: Getter) -> list[Upsert]:
                 "state_version": 1,
                 "created_at": e.at,
                 "updated_at": e.at,
+                "kind": p.get("kind", "code"),
             },
         )
     ]
@@ -791,6 +809,95 @@ def _invite_used(p: dict, e: Event, get: Getter) -> list[Upsert]:
     return [("invites", row)]
 
 
+PLAN_STATES = ("PROPOSED", "ACCEPTED", "REJECTED", "WITHDRAWN")
+INTERVENTION_STATUSES = ("replan", "pause", "stalled")
+
+
+def _plan_proposed(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if get("plans", p["plan_id"]) is not None:
+        raise InvalidTransition(f"plan {p['plan_id']} already exists")
+    return [
+        (
+            "plans",
+            {
+                "plan_id": p["plan_id"], "run_id": p["run_id"], "proposer": p["proposer"], "rationale": p["rationale"],
+                "tasks_json": _j(p["tasks"]), "state": "PROPOSED", "decided_by": None, "decision_reason": None,
+                "created_task_ids_json": "[]", "created_at": e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _plan_decided(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "plans", p["plan_id"])
+    if row["state"] != "PROPOSED":
+        raise InvalidTransition(f"plan {p['plan_id']} is {row['state']}, not PROPOSED")
+    if p["state"] not in PLAN_STATES[1:]:
+        raise ValidationError(f"invalid plan decision {p['state']!r}")
+    row.update(
+        state=p["state"], decided_by=p.get("decided_by"), decision_reason=p.get("reason"),
+        created_task_ids_json=_j(p.get("created_task_ids", [])), updated_at=e.at,
+    )
+    return [("plans", row)]
+
+
+def _task_result(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "tasks", p["task_id"])
+    if get("task_results", p["result_id"]) is not None:
+        raise InvalidTransition(f"result {p['result_id']} already exists")
+    return [
+        (
+            "task_results",
+            {
+                "result_id": p["result_id"], "task_id": p["task_id"], "run_id": p["run_id"], "author": p["author"],
+                "summary": p["summary"], "artifact_ref": p.get("artifact_ref"), "snapshot_id": p.get("snapshot_id"),
+                "decision": None, "decided_by": None, "decision_reason": None, "created_at": e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _task_result_decided(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "task_results", p["result_id"])
+    if row["decision"] is not None:
+        raise InvalidTransition(f"result {p['result_id']} was already decided")
+    if p["decision"] not in ("accepted", "rejected"):
+        raise ValidationError(f"invalid result decision {p['decision']!r}")
+    row.update(decision=p["decision"], decided_by=p["decided_by"], decision_reason=p.get("reason"), updated_at=e.at)
+    return [("task_results", row)]
+
+
+def _contribution_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if get("contributions", p["contribution_id"]) is not None:
+        raise InvalidTransition(f"contribution {p['contribution_id']} already recorded")
+    return [
+        (
+            "contributions",
+            {
+                "contribution_id": p["contribution_id"], "run_id": p["run_id"], "participant_id": p["participant_id"],
+                "provider": p["provider"], "kind": p["kind"], "ref": p["ref"], "summary": p["summary"], "created_at": e.at,
+            },
+        )
+    ]
+
+
+def _intervention_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if p["status"] not in INTERVENTION_STATUSES:
+        raise ValidationError(f"invalid intervention status {p['status']!r}")
+    return [
+        (
+            "interventions",
+            {
+                "intervention_id": p["intervention_id"], "run_id": p["run_id"], "status": p["status"], "task_id": p.get("task_id"),
+                "reason": p["reason"], "evidence_json": _j(p.get("evidence", [])), "fingerprint": p.get("fingerprint"), "created_at": e.at,
+            },
+        )
+    ]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -823,6 +930,12 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "checkpoint.exported": _checkpoint_exported,
     "invite.created": _invite_created,
     "invite.used": _invite_used,
+    "plan.proposed": _plan_proposed,
+    "plan.decided": _plan_decided,
+    "task.result": _task_result,
+    "task.result.decided": _task_result_decided,
+    "contribution.recorded": _contribution_recorded,
+    "intervention.recorded": _intervention_recorded,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

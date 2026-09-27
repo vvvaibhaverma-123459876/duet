@@ -47,11 +47,12 @@ ACTIONABLE_FROM_PEER = frozenset(
 def _actionable(message: dict) -> bool:
     """A turn costs a model call. Start one for peer messages that ask for
     something (questions, answers to our questions, review requests,
-    findings, proposals, blockers) and for controller BLOCKERs. Status notes
-    and review results wait for the next real turn: a rejected review also
-    produces a controller BLOCKER."""
+    findings, proposals, blockers), for controller BLOCKERs and for a
+    controller TASK_PROPOSAL (a task the scheduler suggests for this peer).
+    Status notes and review results wait for the next real turn: a rejected
+    review also produces a controller BLOCKER."""
     if message["from"] == "controller":
-        return message["kind"] == MessageKind.BLOCKER.value
+        return message["kind"] in (MessageKind.BLOCKER.value, MessageKind.TASK_PROPOSAL.value)
     return message["kind"] in ACTIONABLE_FROM_PEER
 
 
@@ -156,7 +157,7 @@ class ManagedPeer:
                     since = result["last_seq"]
                     backlog.extend(result["messages"])
                     if not any(_actionable(m) for m in backlog):
-                        if result["messages"]:
+                        if result["messages"] and since > self.co._cursor(self.principal):
                             self.co.runtime.ack(self.principal, up_to_seq=since)
                         continue
                     messages, backlog = backlog, []
@@ -170,8 +171,12 @@ class ManagedPeer:
                     return
                 if not self._turn(messages):
                     return
-                if since is not None:
+                # The model may have acknowledged further during the turn
+                # (duet_wait/duet_inbox ack_through); never move backwards.
+                cursor = self.co._cursor(self.principal)
+                if since is not None and since > cursor:
                     self.co.runtime.ack(self.principal, up_to_seq=since)
+                since = max(since or 0, cursor)
         except Exception as exc:  # the driver must never die silently
             log.exception("managed %s peer failed", self.provider)
             self._give_up(f"driver error: {type(exc).__name__}: {exc}")
@@ -183,7 +188,8 @@ class ManagedPeer:
             input={"provider": self.provider, "turn": self.turns + 1, "messages": [m["message_id"] for m in messages], "resume": self.session_id},
         )
         action_id = planned["action"]["action_id"]
-        fence = runtime.claim_action(CONTROLLER, action_id)["lease"]["fencing_token"]
+        # The action lease must outlive the turn's own timeout.
+        fence = runtime.claim_action(CONTROLLER, action_id, lease_seconds=int(self.turn_timeout) + 300)["lease"]["fencing_token"]
         runtime.record_action(CONTROLLER, action_id, ActionState.RUNNING, fence=fence)
         writer = self._is_writer()
         settings = self.co.settings(self.run_id)
@@ -298,6 +304,13 @@ class ManagedPeer:
             "Managed sessions end their turn instead of waiting for long: when a message arrives for you, DUET starts a new turn.",
             "Before ending this turn, reply to every question and review request below with duet_send and reply_to.",
         ]
+        try:
+            suggestions = self.co.graph.next_for(self.principal)[:3]
+        except Exception:
+            suggestions = []
+        if suggestions:
+            lines += ["", "## DUET suggests (highest priority first)"]
+            lines += [f"- {s['action']}" + (f" {s['task_id']}" if s.get("task_id") else "") + f": {s['reason']}" for s in suggestions]
         if messages:
             lines += ["", "## New DUET messages"]
             for m in messages:

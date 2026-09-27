@@ -247,7 +247,10 @@ def ensure_service(paths: ServicePaths, *, spawn: bool = True, timeout: float = 
 # --- server -------------------------------------------------------------------------------
 
 PARTICIPANT_OPS = frozenset(
-    {"join", "send", "inbox", "wait", "propose_task", "claim", "submit", "request_review", "request_profile", "status", "disconnect"}
+    {
+        "join", "send", "inbox", "wait", "propose_task", "propose_plan", "decide_plan", "claim", "complete_task", "decide_task",
+        "handoff", "submit", "request_review", "request_profile", "status", "disconnect",
+    }
 )
 CONTROLLER_OPS = frozenset({"pair", "run_status", "cancel", "runs", "shutdown"})
 OPEN_OPS = frozenset({"ping", "join"})
@@ -301,6 +304,9 @@ class RuntimeService:
     def start(self) -> "RuntimeService":
         report = self.runtime.reconcile(CONTROLLER)
         self._settle_in_doubt_checks(report["in_doubt"])
+        # Managed sessions do not survive their service: their drivers are
+        # gone, so they must not keep looking connected.
+        self._release_orphaned_managed_peers("the DUET service restarted; managed sessions are not relaunched automatically")
         if self.paths.socket.exists() or self.paths.socket.is_symlink():
             self.paths.socket.unlink()  # stale: we hold the lock, so no service owns it
         service = self
@@ -345,6 +351,10 @@ class RuntimeService:
     def close(self) -> None:
         self._stop.set()
         self.stop_peers(None)
+        try:
+            self._release_orphaned_managed_peers("the DUET service stopped")
+        except Exception:  # closing must not fail on bookkeeping
+            log.exception("could not mark managed peers unavailable")
         if self._server is not None:
             self._server.shutdown()
             self._server.server_close()
@@ -362,13 +372,35 @@ class RuntimeService:
 
     def _settle_in_doubt_checks(self, action_ids: list[str]) -> None:
         """A check interrupted by a service crash wrote no evidence; checks are
-        read-only and repeatable, so settle it as FAILED and let the writer
-        resubmit. Other in-doubt actions (provider turns) stay IN_DOUBT."""
+        read-only and repeatable, so settle it as FAILED, reopen the task and
+        tell the writer to submit again. Other in-doubt actions (provider
+        turns) stay IN_DOUBT."""
         tx = self.store.read()
+        reopen: set[str] = set()
         for action_id in action_ids:
             row = tx.get("actions", action_id)
             if row and row["type"] == "check":
                 self.runtime.resolve_in_doubt(CONTROLLER, action_id, "FAILED", reconciliation="service restarted during the check; no evidence was recorded")
+                reopen.add(row["run_id"])
+        for run_id in reopen:
+            try:
+                latest = self.coordinator._latest_snapshot(run_id)
+                if latest is not None:
+                    self.coordinator._changes_requested(run_id, latest["snapshot_id"], f"a check on {latest['snapshot_id']} was interrupted by a service restart and recorded no evidence")
+            except DomainError:
+                log.exception("could not reopen run %s after an interrupted check", run_id)
+
+    def _release_orphaned_managed_peers(self, reason: str) -> None:
+        with self._peers_lock:
+            driven = {peer.participant_id for peers in self.peers.values() for peer in peers if getattr(peer, "alive", False)}
+        rows = self.store.read().query(
+            "SELECT p.participant_id, p.run_id, p.liveness, r.lifecycle FROM participants p JOIN runs r ON r.run_id = p.run_id WHERE p.origin = 'managed'"
+        )
+        for row in rows:
+            if row["participant_id"] in driven or row["liveness"] in ("unavailable", "gone") or RunLifecycle(row["lifecycle"]) in TERMINAL_RUN:
+                continue
+            self.runtime.update_participant(CONTROLLER, row["participant_id"], liveness="unavailable")
+            self.coordinator._peer_lost(row["run_id"], row["participant_id"], reason)
 
     def _monitor(self) -> None:
         while not self._stop.wait(MONITOR_SECONDS):
@@ -490,7 +522,17 @@ class RuntimeService:
         if op == "wait":
             return co.wait(principal, **_only(args, {"since", "watch", "timeout", "ack_through"}))
         if op == "propose_task":
-            return co.propose_task(principal, **_only(args, {"description", "depends_on", "acceptance_ids"}))
+            return co.propose_task(principal, **_only(args, {"description", "depends_on", "acceptance_ids", "kind"}))
+        if op == "propose_plan":
+            return co.graph.propose_plan(principal, **_only(args, {"tasks", "rationale"}))
+        if op == "decide_plan":
+            return co.graph.decide_plan(principal, **_only(args, {"plan_id", "decision", "reason"}))
+        if op == "complete_task":
+            return co.graph.complete_task(principal, **_only(args, {"task_id", "summary", "artifact"}))
+        if op == "decide_task":
+            return co.graph.decide_task(principal, **_only(args, {"task_id", "decision", "reason"}))
+        if op == "handoff":
+            return co.graph.handoff(principal, **_only(args, {"reason"}))
         if op == "claim":
             return co.claim(principal, **_only(args, {"task_id"}))
         if op == "submit":

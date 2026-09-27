@@ -66,6 +66,8 @@ async def _act(prompt: str, server: dict) -> str:
             submitted = await call("duet_submit", summary=note)
             done.append(f"submitted {submitted['snapshot_id']}")
 
+        if os.environ.get("FAKE_BRAIN_MODE") == "plan":
+            return await _plan_mode(call, implement, writer, prompt, messages, state, done)
         if writer and "No messages yet" in prompt:
             asked = await call("duet_send", kind="QUESTION", body="Should mul(a, b) live in calc.py next to add()?")
             state.data["my_question"] = asked["message_id"]
@@ -108,3 +110,37 @@ def act(prompt: str, server: dict | None) -> str:
     if not server:
         return "no DUET tools configured"
     return asyncio.run(_act(prompt, server))
+
+
+async def _plan_mode(call, implement, writer, prompt, messages, state, done) -> str:
+    """D06: the writer proposes a plan that gives the reviewer an
+    investigation task, accepts the reviewer's result, then implements."""
+    if writer and "No messages yet" in prompt:
+        plan = await call("duet_propose_plan", rationale="codex investigates callers while I prepare the change", tasks=[
+            {"key": "callers", "description": "Find all callers of add() and whether any pass floats", "kind": "investigate"},
+        ])
+        state.data["plan"] = plan["plan_id"]
+        state.save()
+        return f"proposed {plan['plan_id']}"
+    for m in messages:
+        if m["kind"] == "PLAN_PROPOSAL" and not writer:
+            plan_id = re.search(r"Plan (pln_\w+)", m["body"])[1]
+            await call("duet_decide_plan", plan_id=plan_id, decision="accept", reason="sensible split")
+            done.append(f"accepted {plan_id}")
+        elif m["kind"] == "TASK_PROPOSAL" and not writer:
+            task_id = re.search(r"(tsk_\w+)", m["body"])[1]
+            await call("duet_claim", task_id=task_id)
+            await call("duet_complete_task", task_id=task_id, summary="add() has no float callers", artifact="callers: none outside calc.py")
+            done.append(f"completed {task_id}")
+        elif m["kind"] == "REVIEW_REQUEST" and writer and not m["snapshot"]:
+            task_id = re.search(r"Task (tsk_\w+)", m["body"])[1]
+            await call("duet_decide_task", task_id=task_id, decision="accept", reason="thanks, that settles it")
+            await implement("added mul() after codex's investigation")
+            done.append(f"accepted {task_id} and submitted")
+        elif m["kind"] == "REVIEW_REQUEST" and not writer:
+            path = next(line.split(": ", 1)[1] for line in m["body"].splitlines() if line.startswith("Read-only copy"))
+            ok = "return a * b" in Path(path, "calc.py").read_text()
+            review = {"disposition": "approve"} if ok else {"disposition": "changes_requested", "findings": [{"severity": "blocking", "summary": "mul does not multiply", "location": "calc.py"}]}
+            await call("duet_send", kind="REVIEW_RESULT", body="reviewed", reply_to=m["id"], review=review)
+            done.append(f"reviewed: {review['disposition']}")
+    return "; ".join(done) or "nothing to do yet"
