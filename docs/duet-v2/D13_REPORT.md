@@ -24,7 +24,7 @@
 
 ## Status
 - Implemented and tested (simulated) on Linux.
-- macOS: pending the CI job's result.
+- macOS: the first two CI runs failed (identity length; socket placement under TMPDIR); both are fixed, and the suite passes on macOS in CI from `8f69b81`.
 - Independent Codex review: pending.
 - Nothing live-proven.
 

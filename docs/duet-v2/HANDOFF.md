@@ -22,7 +22,7 @@ and what remains unproven.*
   - Reversible client integrations.
   - Hardening.
   - Every acceptance test has automated evidence or explicit disclosure (`ACCEPTANCE_RESULTS.md`).
-- **Where:** Linux, Python 3.11 and 3.13, root and non-root (CI and local). macOS: a non-blocking CI job, result recorded in `COMPATIBILITY.md`. Windows is unsupported.
+- **Where:** Linux, Python 3.11 and 3.13, root and non-root (CI and local). macOS, Python 3.13: the full suite passes in CI (`8f69b81`); the job is still non-blocking, and `COMPATIBILITY.md` lists the differences. Windows is unsupported.
 - **Control modes:**
   - Managed sessions: push delivery, with model and effort enforced per turn where the CLI exposes them.
   - Native sessions: checkpoint delivery (plus the optional Stop hook), with advisory model and effort. Subagents are not controlled.
@@ -70,7 +70,7 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 1. Run the real pair tests on a machine with both CLIs logged in, as non-root, per `PEER_ALPHA_TEST.md`: `DUET_REAL_PAIR=1` (AT01 and AT02 in both directions, AT03) and `DUET_REAL_PROVIDERS=1`. These use the account's quota; that is why they are gated.
 2. Run the independent Codex review of the branch and address its findings.
 3. Script the `EVALUATION.md` tasks and run the protocol before promoting pairing to a default.
-4. Record the `test-macos` result. If it fails, fix it or keep macOS unsupported.
+4. Decide whether to make the `test-macos` CI job blocking. It passes now, but it is still non-blocking.
 
 ## Known risks
 

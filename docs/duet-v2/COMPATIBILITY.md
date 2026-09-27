@@ -5,7 +5,16 @@
 | Tier | Platform | Evidence |
 |---|---|---|
 | Supported | Linux (Ubuntu), Python 3.11 and 3.13, as a normal user and as root, with and without the MCP SDK | CI on every push: `test (3.11)`, `test (3.13)`, `test-as-root`. Local runs of the whole suite as root and as non-root (umask 002). |
-| Being measured | macOS, Python 3.13 | CI job `test-macos` (non-blocking). Its first run (on `b0f80cb`) **failed**: 22 failures and 54 errors, 815 passed. Almost all came from process identities exceeding the 128-character id limit (a 70-character runner hostname plus the raw `kern.boottime` text). One test assumed exact liveness without `/proc`. Both are fixed: the boot time is stored as `boottime:<sec>`, long hostnames are hashed, and the `/proc`-only test is skipped elsewhere. The second run (`e9ace30`) had 890 passed and 3 failed. MCP proxies and managed peers are started with a minimal environment (no `TMPDIR`), so they looked for the service's short socket under `/tmp` while the service listened under `$TMPDIR` (`/var/folders/...`). The short socket now always lives under `/tmp/duet-<uid>` (checked private and owned). macOS is not claimed as supported until a run passes. Known gap: the Stop hook's session lookup uses `/proc`, so on macOS it finds no session and lets the stop proceed. |
+| Tested (CI) | macOS (GitHub `macos-latest`, arm64), Python 3.13, with the MCP SDK | CI job `test-macos`, which is still non-blocking. It passed on `8f69b81` with 894 passed and 6 skipped. The first two runs failed and led to two fixes, both kept:
+- **Process identities over the id limit:** a 70-character hostname plus the raw `kern.boottime` text. The boot time is now stored as `boottime:<sec>` and long hostnames are hashed.
+- **Short service socket placed under `$TMPDIR`:** MCP proxies and managed peers start without `TMPDIR`, so they looked in `/tmp`. It now always lives under `/tmp/duet-<uid>`, checked to be private and owned by the user.
+
+Differences from Linux:
+- Without `/proc`, liveness checks inside store transactions are conservative. A live pid counts as alive, and the exact check runs outside the transaction.
+- The host-ancestry check is skipped, because there are no peer credentials.
+- The Stop hook's session lookup uses `/proc`, so on macOS it finds no session and lets the stop proceed.
+
+Real CLIs have not been run on macOS. |
 | Untested | WSL | Expected to behave as Linux; no evidence yet. |
 | Unsupported | Native Windows | Unix sockets, process groups, `flock` and `/proc` are assumed throughout. |
 

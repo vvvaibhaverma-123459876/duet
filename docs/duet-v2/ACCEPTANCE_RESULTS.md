@@ -35,6 +35,7 @@ runs on the D14 tree (D13 `b0f80cb` plus the D14 tests):
 | Linux, root, core dependencies | 889 passed, 6 skipped |
 | Linux, root, with the MCP SDK | 894 passed, 4 skipped |
 | Linux, non-root user (umask 002) | 887 passed, 8 skipped |
+| macOS (CI `test-macos`, `8f69b81`), Python 3.13 with the MCP SDK | 894 passed, 6 skipped |
 
 Skips are real-provider tests (gated) and dependency-specific tests. A
 skipped real-provider test is never counted as evidence.

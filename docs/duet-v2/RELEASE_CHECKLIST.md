@@ -19,7 +19,7 @@ simulation-tested, not yet live-proven or independently reviewed.**
 
 - [x] Every acceptance test has automated evidence or explicit disclosure (`ACCEPTANCE_RESULTS.md`).
 - [x] CI is green on Linux (3.11, 3.13, root) at the release revision. Check the PR's checks for the exact head.
-- [ ] macOS: the `test-macos` CI job is non-blocking. Record its result in `COMPATIBILITY.md` before claiming support.
+- [x] macOS: the `test-macos` CI job passes (894 passed, 6 skipped on `8f69b81`). It is still non-blocking. The differences from Linux are in `COMPATIBILITY.md`.
 - [x] The wheel installs and runs outside the source tree, with every migration packaged (`test_packaging.py`).
 - [x] No paid fallback, API-key path or permission bypass (R13 tests; `SECURITY_MODEL.md`).
 - [x] Every legacy command keeps its interface. The changed semantics are documented (D-002, `COMPATIBILITY.md`).
@@ -64,5 +64,5 @@ deliverable is the DUET branch named in the report, never your checkout.
 ## Remaining limitations
 
 See `SECURITY_MODEL.md` (no sandbox; pattern-based redaction),
-`COMPATIBILITY.md` (Linux only proven), `CAPABILITY_MATRIX.md` (NOT_RUN
+`COMPATIBILITY.md` (Linux and macOS in CI; no real CLI on either), `CAPABILITY_MATRIX.md` (NOT_RUN
 rows), and the final report's own limitations list.
