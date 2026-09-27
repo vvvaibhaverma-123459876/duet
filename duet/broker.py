@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -76,11 +77,14 @@ def run_session(
     on_quota: str = "halt",
     quota_wait_seconds: int = 300,
     budget_usd: float = 0.0,
+    commit_mode: str = "default",
 ) -> SessionResult:
     if start_with not in agents:
         raise ValueError(f"unknown start agent: {start_with}")
     if on_quota not in ("halt", "solo", "wait"):
         raise ValueError(f"on_quota must be halt, solo, or wait, got {on_quota!r}")
+    if commit_mode not in ("default", "agent-driven"):
+        raise ValueError(f"commit_mode must be default or agent-driven, got {commit_mode!r}")
     order = list(agents.keys())
     if not order:
         raise ValueError("duet requires at least one available agent")
@@ -99,6 +103,7 @@ def run_session(
         prompt = build_prompt(task, transcript, partner_last, workspace_state(workspace), role)
         if on_turn:
             on_turn(f"\n--- Turn {turn + 1}: {agent.display_name} ---")
+        head_before = _head(workspace) if commit_mode == "agent-driven" else ""
         try:
             result = agent.send(prompt, workspace)
         except QuotaError as exc:
@@ -141,16 +146,22 @@ def run_session(
             session = Session(task, workspace, transcript, "halted", "AgentError")
             return _result(session, save_artifacts(workspace, transcript))
         cleaned, token = strip_control_tokens(result.text)
-        try:
-            committed = commit_after_turn(workspace, agent_name, agent.display_name)
-        except WorkspaceError as exc:
-            log.error("turn %s (%s) commit failed: %s", turn + 1, agent_name, exc)
-            transcript.outcome = "halted"
-            transcript.stop_condition = "WorkspaceError"
-            transcript.error = str(exc)
-            session = Session(task, workspace, transcript, "halted", "WorkspaceError")
-            return _result(session, save_artifacts(workspace, transcript))
-        content = cleaned + (f"\n\n[Duet: committed workspace changes]" if committed else "\n\n[Duet: no workspace changes]")
+        if commit_mode == "agent-driven":
+            # The agent owns its commit sequence and messages; injecting a Broker
+            # commit here would bury or mis-message them. Report what it actually did.
+            note = _agent_commit_note(workspace, head_before)
+        else:
+            try:
+                committed = commit_after_turn(workspace, agent_name, agent.display_name)
+            except WorkspaceError as exc:
+                log.error("turn %s (%s) commit failed: %s", turn + 1, agent_name, exc)
+                transcript.outcome = "halted"
+                transcript.stop_condition = "WorkspaceError"
+                transcript.error = str(exc)
+                session = Session(task, workspace, transcript, "halted", "WorkspaceError")
+                return _result(session, save_artifacts(workspace, transcript))
+            note = "[Duet: committed workspace changes]" if committed else "[Duet: no workspace changes]"
+        content = cleaned + "\n\n" + note
         message = Message(
             turn_index=turn + 1,
             agent=agent_name,
@@ -201,6 +212,30 @@ def run_session(
     transcript.stop_condition = f"MaxTurns({max_turns})"
     session = Session(task, workspace, transcript, "halted", transcript.stop_condition)
     return _result(session, save_artifacts(workspace, transcript))
+
+
+def _head(workspace: Path) -> str:
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace, text=True, capture_output=True)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _agent_commit_note(workspace: Path, head_before: str) -> str:
+    """Under agent-driven mode Duet commits nothing, so the turn note reports what
+    the agent committed on its own — and flags a dirty tree rather than hiding it
+    behind an auto-commit."""
+    head_after = _head(workspace)
+    if head_after and head_after != head_before:
+        span = f"{head_before}..{head_after}" if head_before else head_after
+        subjects = subprocess.run(
+            ["git", "log", "--format=%h %s", span], cwd=workspace, text=True, capture_output=True
+        ).stdout.strip()
+        count = len(subjects.splitlines())
+        plural = "commit" if count == 1 else "commits"
+        return f"[Duet: agent made {count} {plural}]\n{subjects}"
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=workspace, text=True, capture_output=True).stdout.strip()
+    if dirty:
+        return "[Duet: agent left uncommitted changes and made no commit]"
+    return "[Duet: agent made no commit and left no changes]"
 
 
 def _all_agents_spoke(transcript: Transcript, agent_names: list[str]) -> bool:

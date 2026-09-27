@@ -11,6 +11,8 @@ from .adapters import DEFAULT_QUOTA_MARKERS, SESSION_ID_PLACEHOLDER, CLIAgent
 
 VALID_PROMPT_VIA = {"stdin", "stdin-sentinel", "arg"}
 VALID_OUTPUT_FORMAT = {"text", "text-last-line", "json"}
+VALID_ISOLATE = {"none", "worktree", "snapshot"}
+VALID_COMMIT_MODE = {"default", "agent-driven"}
 
 
 class ConfigError(RuntimeError):
@@ -26,6 +28,8 @@ class SessionConfig:
     on_quota: str = "halt"
     quota_wait_seconds: int = 300
     budget_usd: float = 0.0
+    isolate: str = "none"
+    commit_mode: str = "default"
 
 
 @dataclass
@@ -59,11 +63,19 @@ def load_config(path: str | Path | None = None) -> DuetConfig:
             on_quota=str(session_data.get("on_quota", "halt")),
             quota_wait_seconds=int(session_data.get("quota_wait_seconds", 300)),
             budget_usd=float(session_data.get("budget_usd", 0.0)),
+            isolate=str(session_data.get("isolate", "none")),
+            commit_mode=str(session_data.get("commit_mode", "default")),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"invalid [session] values in {config_path}: {exc}") from exc
     if session.on_quota not in ("halt", "solo", "wait"):
         raise ConfigError(f"invalid [session] on_quota in {config_path}: must be halt, solo, or wait")
+    if session.isolate not in VALID_ISOLATE:
+        raise ConfigError(f"invalid [session] isolate in {config_path}: must be one of {', '.join(sorted(VALID_ISOLATE))}")
+    if session.commit_mode not in VALID_COMMIT_MODE:
+        raise ConfigError(
+            f"invalid [session] commit_mode in {config_path}: must be one of {', '.join(sorted(VALID_COMMIT_MODE))}"
+        )
 
     agents = {}
     for name, item in data.get("agents", {}).items():
@@ -113,6 +125,21 @@ def _build_agent(name: str, item: dict, config_path: Path) -> CLIAgent:
         cost_json_path=item.get("cost_json_path", ""),
         quota_markers=list(item.get("quota_markers", [])) or list(DEFAULT_QUOTA_MARKERS),
     )
+
+
+def resolve_option(cli_value, env_name: str, config_value, valid: set[str] | None = None):
+    """CLI flag > environment > project config > default.
+
+    Duet had no general environment tier before isolate/commit_mode; this keeps the
+    established `cli or config` shape and slots env between them. An empty string is
+    treated as unset so `DUET_ISOLATE=` does not shadow the config."""
+    for source, value in (("--flag", cli_value), (env_name, os.environ.get(env_name))):
+        if value in (None, ""):
+            continue
+        if valid and value not in valid:
+            raise ConfigError(f"invalid {source} value {value!r}: must be one of {', '.join(sorted(valid))}")
+        return value
+    return config_value
 
 
 def discover_config_path(path: str | Path | None = None) -> Path:

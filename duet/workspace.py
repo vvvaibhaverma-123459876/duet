@@ -158,6 +158,9 @@ def release_lock(workspace: Path) -> None:
 # --- Live (existing) repository support -------------------------------------
 
 
+ISOLATE_MODES = ("none", "worktree", "snapshot")
+
+
 @dataclass
 class LiveRepo:
     workspace: Path
@@ -166,6 +169,17 @@ class LiveRepo:
     base_commit: str | None
     preexisting_stash: str | None = None
     worktree_of: Path | None = None  # set when workspace is a linked worktree of this repo
+    snapshot_of: Path | None = None  # set when workspace is a copytree replica of this repo
+    isolate: str = "none"
+
+    @property
+    def source(self) -> Path:
+        """The user's real repo, whichever isolation mode produced the workspace."""
+        return self.worktree_of or self.snapshot_of or self.workspace
+
+    @property
+    def isolated(self) -> bool:
+        return self.isolate != "none"
 
 
 def _git_out(args: list[str], cwd: Path) -> str:
@@ -182,13 +196,38 @@ def is_git_worktree(path: Path) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "true"
 
 
-def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = False, worktree: bool = False) -> LiveRepo:
+def prepare_live_repo(
+    path: str,
+    branch: str | None = None,
+    allow_dirty: bool = False,
+    worktree: bool = False,
+    isolate: str = "none",
+    base: str | None = None,
+    exclude: list[str] | None = None,
+    carry: list[str] | None = None,
+) -> LiveRepo:
     """Prepare an existing git repo for a Duet session on an isolated branch.
 
-    With worktree=True the session runs in a linked `git worktree` created from
-    HEAD, so the user's checkout (current branch, index, open editors, live
-    agent TUIs) is never switched or touched. Uncommitted changes are not
-    carried into the worktree."""
+    `isolate` selects how strongly the session is separated from the source repo:
+
+    - "none" (default): work in place on the real repo, as Duet has always done.
+    - "worktree": run in a linked `git worktree` created from HEAD, so the user's
+      checkout (current branch, index, open editors, live agent TUIs) is never
+      switched. Uncommitted and untracked files are not carried in; use `carry`.
+    - "snapshot": copy the whole repo directory into a scratch session dir, so the
+      replica is runnable (deps, .env) and the source is never touched at all.
+
+    `worktree=True` is the historical spelling of isolate="worktree" and stays
+    supported in both directions."""
+    if worktree and isolate == "none":
+        isolate = "worktree"
+    if worktree and isolate != "worktree":
+        raise WorkspaceError(f"--worktree conflicts with --isolate {isolate}; --worktree means --isolate worktree")
+    if isolate not in ISOLATE_MODES:
+        raise WorkspaceError(f"unknown isolate mode {isolate!r}: must be one of {', '.join(ISOLATE_MODES)}")
+    if exclude and isolate != "snapshot":
+        raise WorkspaceError(f"--exclude only applies to --isolate snapshot, not {isolate!r}")
+
     repo = Path(path).expanduser()
     if not repo.exists():
         raise WorkspaceError(f"repo path does not exist: {repo}")
@@ -199,8 +238,10 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
 
     top = Path(_git_out(["rev-parse", "--show-toplevel"], repo))
 
-    if worktree:
-        return _prepare_worktree(top, branch)
+    if isolate == "worktree":
+        return _prepare_worktree(top, branch, base, carry)
+    if isolate == "snapshot":
+        return _prepare_snapshot(top, branch, base, exclude, carry)
 
     dirty = bool(_git_out(["status", "--porcelain"], repo))
     if dirty and not allow_dirty:
@@ -223,9 +264,8 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
         _run(["git", "stash", "push", "-u", "-m", "duet-preexisting"], top)
         preexisting_stash = _git_out(["rev-parse", "stash@{0}"], top)
 
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    branch = branch or _unique_branch(top, f"duet/session-{stamp}")
-    _run(["git", "checkout", "-b", branch], top)
+    branch = _resolve_branch(top, branch, base)
+    _run(["git", "checkout", "-b", branch, *([base] if base else [])], top)
     if preexisting_stash:
         # Bring the dirty changes back onto the fresh branch, then drop the
         # stack entry; the captured object id keeps them recoverable.
@@ -242,7 +282,7 @@ def prepare_live_repo(path: str, branch: str | None = None, allow_dirty: bool = 
     )
 
 
-def _prepare_worktree(top: Path, branch: str | None) -> LiveRepo:
+def _prepare_worktree(top: Path, branch: str | None, base: str | None = None, carry: list[str] | None = None) -> LiveRepo:
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=top, text=True, capture_output=True)
     if head.returncode != 0:
         raise WorkspaceError(f"cannot use --worktree on a repo with no commits: {top}")
@@ -250,12 +290,12 @@ def _prepare_worktree(top: Path, branch: str | None) -> LiveRepo:
     original = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], cwd=top, text=True, capture_output=True)
     original_ref = original.stdout.strip() or base_commit
 
-    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    branch = branch or _unique_branch(top, f"duet/session-{stamp}")
+    branch = _resolve_branch(top, branch, base)
     wt_dir = Path(tempfile.mkdtemp(prefix="duet-wt-"))
     # mkdtemp creates the dir; `git worktree add` wants to create it itself.
     wt_dir.rmdir()
-    _run(["git", "worktree", "add", "-b", branch, str(wt_dir), "HEAD"], top)
+    _run(["git", "worktree", "add", "-b", branch, str(wt_dir), base or "HEAD"], top)
+    _carry_paths(top, wt_dir, carry)
     _exclude_duet_dir(wt_dir)
     acquire_lock(wt_dir)
     log.info("prepared worktree %s for %s on branch %s (base=%s)", wt_dir, top, branch, base_commit)
@@ -265,7 +305,100 @@ def _prepare_worktree(top: Path, branch: str | None) -> LiveRepo:
         original_ref=original_ref,
         base_commit=base_commit,
         worktree_of=top,
+        isolate="worktree",
     )
+
+
+def _prepare_snapshot(
+    top: Path,
+    branch: str | None,
+    base: str | None,
+    exclude: list[str] | None,
+    carry: list[str] | None,
+) -> LiveRepo:
+    """Copy the whole repo directory — .git, tracked, untracked, ignored — into a
+    scratch session dir. The replica keeps full history and the real `origin`, and
+    is runnable because deps and `.env` come along. The source is never touched."""
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=top, text=True, capture_output=True)
+    base_commit = head.stdout.strip() if head.returncode == 0 else None
+    original = subprocess.run(["git", "symbolic-ref", "--short", "-q", "HEAD"], cwd=top, text=True, capture_output=True)
+    original_ref = original.stdout.strip() or base_commit or "HEAD"
+
+    snap = Path(tempfile.mkdtemp(prefix="duet-snap-")) / top.name
+    # `.duet/` holds the source session's lock; copying a live lock in would make
+    # the replica look locked by a foreign pid. Always drop it, alongside --exclude.
+    patterns = [".duet", *(exclude or [])]
+    try:
+        shutil.copytree(top, snap, symlinks=True, ignore=shutil.ignore_patterns(*patterns))
+    except (OSError, shutil.Error) as exc:
+        raise WorkspaceError(f"could not snapshot {top}: {exc}") from exc
+    if not (snap / ".git").exists():
+        raise WorkspaceError(f"snapshot of {top} has no .git; refusing to run without history")
+
+    # The replica's checked-out branch is the source's; cut the session branch off
+    # the requested base so the source branch is never advanced even by accident.
+    branch = _resolve_branch(snap, branch, base)
+    _run(["git", "checkout", "-b", branch, *([base] if base else [])], snap)
+    _carry_paths(top, snap, carry)
+    _exclude_duet_dir(snap)
+    acquire_lock(snap)
+    log.info("prepared snapshot %s of %s on branch %s (base=%s)", snap, top, branch, base_commit)
+    return LiveRepo(
+        workspace=snap,
+        branch=branch,
+        original_ref=original_ref,
+        base_commit=base_commit,
+        snapshot_of=top,
+        isolate="snapshot",
+    )
+
+
+def _carry_paths(source: Path, dest: Path, carry: list[str] | None) -> None:
+    """Copy named untracked files/dirs from the source repo into the workspace.
+
+    Needed for worktree, which starts from a clean checkout. Under snapshot the
+    files are already there, so each copy is a self-overwrite no-op."""
+    for rel in carry or []:
+        src = source / rel
+        if not src.exists():
+            raise WorkspaceError(f"--carry path does not exist in {source}: {rel}")
+        target = dest / rel
+        if target.resolve() == src.resolve():
+            continue  # snapshot already carried it; nothing to do
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, target, symlinks=True, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, target)
+        log.info("carried %s into %s", rel, dest)
+
+
+def _resolve_branch(top: Path, branch: str | None, base: str | None) -> str:
+    """An explicit --branch must be free: never silently reset or reuse a branch a
+    user already has work on. Without one, fall back to the duet/session-* scheme."""
+    if base and not _ref_exists(top, base):
+        raise WorkspaceError(f"base ref does not resolve in {top}: {base}")
+    if not branch:
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+        return _unique_branch(top, f"duet/session-{stamp}")
+    if _branch_exists(top, branch):
+        raise WorkspaceError(
+            f"branch already exists: {branch}. Pick another --branch name, or delete it first; "
+            f"Duet will not reset a branch that may hold your work."
+        )
+    return branch
+
+
+def _branch_exists(top: Path, name: str) -> bool:
+    return subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"], cwd=top, capture_output=True
+    ).returncode == 0
+
+
+def _ref_exists(top: Path, ref: str) -> bool:
+    return subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=top, capture_output=True
+    ).returncode == 0
 
 
 def remove_worktree(live: LiveRepo, delete_branch: bool = False) -> None:

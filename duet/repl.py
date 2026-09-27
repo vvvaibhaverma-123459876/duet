@@ -24,11 +24,13 @@ class Repl:
         no_color: bool = False,
         stdin: TextIO | None = None,
         stdout: TextIO | None = None,
+        commit_mode: str = "default",
     ) -> None:
         self.config = config
         self.available_agents = available_agents
         self.agents = {name: agent for name, agent in config.agents.items() if name in available_agents}
         self.workspace = workspace or create_workspace()
+        self.commit_mode = commit_mode
         self.stdin = stdin or sys.stdin
         self.stdout = stdout or sys.stdout
         self.ui = UI(no_color=no_color, stream=self.stdout)
@@ -81,6 +83,7 @@ class Repl:
             roles=roles,
             on_turn=self.ui.turn,
             require_all_agents_for_success=len(self.agents) > 1,
+            commit_mode=self.commit_mode,
         )
         self.last_result = result
         print(f"Outcome: {result.outcome} · stop: {result.stop_condition}", file=self.stdout)

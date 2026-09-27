@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import sys
 import time
@@ -10,7 +11,14 @@ from pathlib import Path
 from . import __version__
 from .adapters import AgentError
 from .broker import run_session
-from .config import ConfigError, load_config, write_config
+from .config import (
+    VALID_COMMIT_MODE,
+    VALID_ISOLATE,
+    ConfigError,
+    load_config,
+    resolve_option,
+    write_config,
+)
 from .doctor import available_agent_names, format_checks, hard_failures, run_doctor
 from .logging_setup import configure_logging, get_logger
 from .control import running_targets, stop_target
@@ -60,6 +68,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--log-level", default=None, help="DEBUG/INFO/WARNING/ERROR (or set DUET_LOG)")
     parser.add_argument("--log-file", default=None, help="also write logs to this file")
+    # Repo/isolation options for the interactive REPL launch; `run` declares its own.
+    parser.add_argument("--repo", default=None, help="start the REPL against an existing git repo")
+    parser.add_argument("--isolate", choices=["none", "worktree", "snapshot"], default=None)
+    parser.add_argument("--worktree", action="store_true", help="alias for --isolate worktree")
+    parser.add_argument("--branch", default=None)
+    parser.add_argument("--base", default=None)
+    parser.add_argument("--exclude", action="append", default=None, metavar="GLOB")
+    parser.add_argument("--carry", action="append", default=None, metavar="PATH")
+    parser.add_argument("--commit-mode", choices=["default", "agent-driven"], default=None)
+    parser.add_argument("--allow-dirty", action="store_true")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("doctor")
@@ -70,6 +88,33 @@ def main(argv: list[str] | None = None) -> int:
         run.add_argument("--workspace")
         run.add_argument("--repo", help="operate on an existing git repo (live mode) on an isolated duet/ branch")
         run.add_argument("--branch", help="branch name to create for the session (live mode)")
+        run.add_argument("--base", help="ref to branch off before turn 1 (requires --repo; implies explicit branch naming)")
+        run.add_argument(
+            "--isolate",
+            choices=["none", "worktree", "snapshot"],
+            default=None,
+            help="with --repo: none=in place (default), worktree=linked worktree, snapshot=full copy incl. untracked (or set DUET_ISOLATE)",
+        )
+        run.add_argument(
+            "--exclude",
+            action="append",
+            default=None,
+            metavar="GLOB",
+            help="skip paths when copying (--isolate snapshot only); repeatable, e.g. --exclude node_modules",
+        )
+        run.add_argument(
+            "--carry",
+            action="append",
+            default=None,
+            metavar="PATH",
+            help="copy an untracked file/dir from the source repo into the workspace (e.g. --carry .env); repeatable",
+        )
+        run.add_argument(
+            "--commit-mode",
+            choices=["default", "agent-driven"],
+            default=None,
+            help="default=Broker commits each turn; agent-driven=Broker commits nothing, agents' own commits are attributed to them (or set DUET_COMMIT_MODE)",
+        )
         run.add_argument("--allow-dirty", action="store_true", help="permit uncommitted changes in the target repo")
         run.add_argument("--rollback-on-failure", action="store_true", help="discard the duet branch if the session does not succeed")
         run.add_argument("--start", choices=["claude", "codex"])
@@ -81,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             metavar="SPEC",
             help="verification gate: pytest, none, or cmd:<shell command>; repeat for an all-must-pass composite",
         )
-        run.add_argument("--worktree", action="store_true", help="run in an isolated git worktree; your checkout is never switched")
+        run.add_argument("--worktree", action="store_true", help="alias for --isolate worktree")
         run.add_argument("--budget-usd", type=float, default=None, help="halt when reported model cost reaches this (Claude reports cost; Codex CLI does not)")
         run.add_argument("--seed-demo", action="store_true")
         run.add_argument("--interactive-handoff", action="store_true")
@@ -284,16 +329,31 @@ def _run_headless(args, config) -> int:
 
     live: LiveRepo | None = None
     try:
+        isolate = _resolve_isolate(args, config)
+        commit_mode = resolve_option(
+            getattr(args, "commit_mode", None), "DUET_COMMIT_MODE", config.session.commit_mode, VALID_COMMIT_MODE
+        )
         if args.repo:
             live = prepare_live_repo(
                 args.repo,
                 branch=args.branch,
                 allow_dirty=args.allow_dirty,
-                worktree=getattr(args, "worktree", False),
+                worktree=False,  # folded into `isolate` by _resolve_isolate
+                isolate=isolate,
+                base=getattr(args, "base", None),
+                exclude=getattr(args, "exclude", None),
+                carry=getattr(args, "carry", None),
             )
             workspace = live.workspace
         else:
             workspace = create_workspace(args.workspace)
+    except ConfigError as exc:
+        message = f"Invalid option: {exc}"
+        if args.output_format == "json":
+            print(json.dumps({"outcome": "halted", "error": str(exc)}, indent=2))
+        else:
+            print(message, file=sys.stderr)
+        return 1
     except WorkspaceError as exc:
         message = f"Cannot prepare workspace: {exc}"
         if args.output_format == "json":
@@ -302,9 +362,22 @@ def _run_headless(args, config) -> int:
             print(message, file=sys.stderr)
         return 1
 
+    if commit_mode == "agent-driven":
+        # Duet commits nothing in this mode; the agents' own commits carry their
+        # identity because the subprocess environment says so.
+        for agent in agents.values():
+            agent.extra_env.update(agent.git_identity_env())
+
     if live and args.output_format == "text":
-        kind = f"worktree of {live.worktree_of}" if live.worktree_of else "live repo"
+        kind = {
+            "worktree": f"worktree of {live.worktree_of}",
+            "snapshot": f"snapshot of {live.snapshot_of}",
+        }.get(live.isolate, "live repo")
         print(f"Live repo: {live.workspace} ({kind}, branch {live.branch}, base {live.base_commit or 'no commits yet'})")
+        if live.isolated:
+            print(f"Source repo {live.source} will not be modified.")
+        if commit_mode == "agent-driven":
+            print("Commit mode: agent-driven (Duet injects no commits; agents commit as themselves)")
 
     success = False
     run_id = None
@@ -344,6 +417,7 @@ def _run_headless(args, config) -> int:
             on_quota=getattr(args, "on_quota", None) or config.session.on_quota,
             quota_wait_seconds=getattr(args, "quota_wait_seconds", None) or config.session.quota_wait_seconds,
             budget_usd=budget,
+            commit_mode=commit_mode,
         )
         finish_run(run_id, result.outcome, result.session.transcript.total_cost_usd)
         finished = True
@@ -400,7 +474,15 @@ def _run_headless(args, config) -> int:
     finally:
         if run_id and not finished:
             finish_run(run_id, "interrupted")
-        if live and not success:
+        if live and live.snapshot_of:
+            # The source repo was never touched, so there is nothing to roll back.
+            # Hand the user the replica; it is a real repo with the true origin.
+            print(
+                f"Snapshot kept at {live.workspace} (branch {live.branch}); {live.snapshot_of} is unchanged. "
+                f"Review with: git -C {live.workspace} log {live.branch}",
+                file=sys.stderr,
+            )
+        elif live and not success:
             if args.rollback_on_failure:
                 if live.worktree_of:
                     remove_worktree(live, delete_branch=True)
@@ -417,6 +499,27 @@ def _run_headless(args, config) -> int:
                 file=sys.stderr,
             )
         release_lock(workspace)
+
+
+def _resolve_isolate(args, config) -> str:
+    """Fold `--worktree` and `--isolate` into one value under the standard
+    precedence. The two spell the same thing, so they may agree but never differ."""
+    cli_isolate = getattr(args, "isolate", None)
+    worktree = getattr(args, "worktree", False)
+    if worktree and cli_isolate and cli_isolate != "worktree":
+        raise ConfigError(f"--worktree conflicts with --isolate {cli_isolate}; --worktree means --isolate worktree")
+    if worktree:
+        cli_isolate = "worktree"
+    isolate = resolve_option(cli_isolate, "DUET_ISOLATE", config.session.isolate, VALID_ISOLATE)
+
+    if not getattr(args, "repo", None):
+        # A config-file default must not break from-scratch runs, but a flag or env
+        # var set for *this* run is a mistake worth surfacing rather than ignoring.
+        requested = cli_isolate or os.environ.get("DUET_ISOLATE")
+        if requested and requested != "none":
+            raise ConfigError("--isolate/DUET_ISOLATE only applies with --repo; from-scratch runs are already isolated")
+        return "none"
+    return isolate
 
 
 def _connect(args, config) -> int:
@@ -464,8 +567,22 @@ def _connect(args, config) -> int:
         quota_wait_seconds=args.quota_wait_seconds,
         worktree=args.worktree,
         budget_usd=args.budget_usd,
+        **_pinned_live_options(args.worktree),
     )
     return _run_headless(run_args, config)
+
+
+def _pinned_live_options(worktree: bool) -> dict:
+    """`connect` and `resume` reattach real agent CLI sessions to a real repo. A
+    snapshot replica is a directory those sessions have never seen, so isolation is
+    pinned here as an explicit value that outranks DUET_ISOLATE and duet.toml."""
+    return {
+        "isolate": "worktree" if worktree else "none",
+        "base": None,
+        "exclude": None,
+        "carry": None,
+        "commit_mode": None,
+    }
 
 
 def _resolve_connect_session(activity, agent: str, explicit: str | None) -> tuple[str | None, bool]:
@@ -534,6 +651,7 @@ def _resume(args, config) -> int:
         quota_wait_seconds=args.quota_wait_seconds,
         worktree=args.worktree,
         budget_usd=args.budget_usd,
+        **_pinned_live_options(args.worktree),
     )
     return _run_headless(run_args, config)
 
@@ -666,16 +784,58 @@ def _run_interactive(args, config) -> int:
         print("\nAborting: doctor found hard failures.", file=sys.stderr)
         return 1
     available = available_agent_names(checks)
-    repl = Repl(config, available, no_color=args.no_color)
+
+    live: LiveRepo | None = None
+    try:
+        isolate = _resolve_isolate(args, config)
+        commit_mode = resolve_option(
+            getattr(args, "commit_mode", None), "DUET_COMMIT_MODE", config.session.commit_mode, VALID_COMMIT_MODE
+        )
+        if args.repo:
+            live = prepare_live_repo(
+                args.repo,
+                branch=args.branch,
+                allow_dirty=args.allow_dirty,
+                isolate=isolate,
+                base=args.base,
+                exclude=args.exclude,
+                carry=args.carry,
+            )
+    except (ConfigError, WorkspaceError) as exc:
+        print(f"Cannot prepare workspace: {exc}", file=sys.stderr)
+        return 1
+
+    agents = {name: agent for name, agent in config.agents.items() if name in available}
+    if commit_mode == "agent-driven":
+        for agent in agents.values():
+            agent.extra_env.update(agent.git_identity_env())
+
+    repl = Repl(
+        config,
+        available,
+        workspace=live.workspace if live else None,
+        no_color=args.no_color,
+        commit_mode=commit_mode,
+    )
+    if live:
+        print(f"Repo session: {repl.workspace} (isolate={live.isolate}, branch {live.branch})")
+        if live.isolated:
+            print(f"Source repo {live.source} will not be modified.")
     if args.seed_demo:
         seed_demo(repl.workspace)
-    return repl.run()
+    try:
+        return repl.run()
+    finally:
+        if live and live.worktree_of:
+            print(
+                f"Worktree kept at {live.workspace}; clean up with: "
+                f"git -C {live.worktree_of} worktree remove {live.workspace}",
+                file=sys.stderr,
+            )
 
 
 def _init_target(args) -> Path:
     if args.user:
-        import os
-
         return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "duet" / "config.toml"
     return Path.cwd() / "duet.toml"
 

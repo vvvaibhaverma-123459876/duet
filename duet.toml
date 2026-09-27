@@ -7,6 +7,12 @@ loop_threshold = 0.9
 # "solo" (drop it, surviving agent continues), or "wait" (sleep and retry).
 on_quota = "halt"
 quota_wait_seconds = 300
+# With --repo: "none" (in place), "worktree" (linked worktree), or "snapshot"
+# (full copy incl. untracked/ignored files; source never touched).
+isolate = "none"
+# "default" (Broker commits each turn) or "agent-driven" (Broker commits nothing;
+# agents' own commits are attributed to them via their subprocess git identity).
+commit_mode = "default"
 
 [agents.claude]
 display_name = "Claude"

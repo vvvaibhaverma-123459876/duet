@@ -99,7 +99,13 @@ Live mode is safe by default:
   (`git log`, `git diff`) and merge deliberately.
 - `--rollback-on-failure` discards the Duet branch if the session does not
   succeed (or is interrupted); otherwise the branch is left for inspection.
-- `--branch NAME` overrides the generated branch name.
+- `--branch NAME` overrides the generated branch name, and `--base REF` chooses
+  what it branches off. If `NAME` already exists Duet fails rather than resetting
+  it. When you pass `--branch`, your task prompt should **not** also tell the
+  agents to create a branch — Duet already did, and they should commit onto it.
+
+`--repo` edits your real repo in place. To work inside an isolated replica
+instead, see [Isolation modes](#isolation-modes) below.
 
 Because the bundled agent commands run non-interactively
 (`--dangerously-skip-permissions` for Claude, `--ask-for-approval never` for
@@ -190,14 +196,96 @@ duet run --repo . \
   "Fix the dashboard health check"
 ```
 
-## Worktree isolation
+## Isolation modes
 
-`--worktree` (on `run`/`exec`/`connect`/`resume`) runs the session in a linked
-`git worktree` created from HEAD. Your checkout — current branch, index, open
-editors, a live agent TUI sitting in the repo — is never switched or touched.
-The session branch lands in the main repo as usual; the worktree is kept for
-inspection (cleanup command printed at the end), and `--rollback-on-failure`
-removes both worktree and branch.
+`--isolate` chooses how far a `--repo` session is separated from your real
+repository. It only applies together with `--repo`; from-scratch runs already work
+in a fresh scratch workspace.
+
+| `--isolate` | Agents work in | History | Untracked/ignored files | Your repo |
+| --- | --- | --- | --- | --- |
+| `none` *(default)* | the real repo | full | present | branch cut, tree edited |
+| `worktree` | a linked git worktree | full | **absent** — use `--carry` | branch added, checkout untouched |
+| `snapshot` | a full copy in a temp dir | full | present | **never touched** |
+
+Bare `--repo` is exactly `--repo --isolate none`, unchanged from earlier versions.
+`--worktree` remains an alias for `--isolate worktree`.
+
+```bash
+# Faithful, runnable replica: deps, .env, full history, real origin — source untouched.
+duet run --repo ./app --isolate snapshot "Fix the flaky retry test" --verify pytest
+
+# Skip the expensive ignored directories.
+duet run --repo ./app --isolate snapshot --exclude node_modules --exclude .venv "..."
+
+# Worktree starts from a clean checkout, so bring the files it omits.
+duet run --repo ./app --worktree --carry .env "..."
+```
+
+**`worktree` omits untracked and ignored files.** It is a clean checkout of a
+commit, so `.env`, `node_modules/`, `.venv/`, and build output are simply not
+there, and a repo that needs them will not run. `--carry <path>` (repeatable)
+copies named untracked files or directories in from the source. Under `snapshot`
+those files are already present, so `--carry` is a harmless no-op — the same
+command line works under either mode.
+
+**`snapshot` copies everything, including what you ignore.** `shutil.copytree`
+brings `.git`, tracked, untracked, and ignored files across, which is what makes
+the replica runnable and preserves the true `origin` and full history. The cost is
+that a repo with a 900 MB `node_modules/` copies 900 MB. Use `--exclude <glob>`
+(repeatable, snapshot only) to skip those paths; nothing is excluded by default.
+A dirty source is fine under `snapshot` — it is never touched, so `--allow-dirty`
+is only meaningful for `--isolate none`.
+
+**Pushing.** Duet never pushes and never merges, in any mode. Under `snapshot` the
+replica keeps your real `origin`, so a `git push` from the workspace *would* reach
+your remote — that is deliberate, so a finished branch can be published from the
+replica, but it means the replica is isolated from your *working copy*, not from
+your remote. Review before you push:
+
+```bash
+git -C <workspace> log <branch>
+git -C <workspace> diff main...<branch>
+```
+
+The workspace path, branch, and a reminder that the source is unmodified are all
+printed at the end of the run. Worktrees are kept for inspection (with a cleanup
+command); `--rollback-on-failure` removes both worktree and branch. Snapshots have
+nothing to roll back — the source never changed — so the replica is simply left in
+place for you to inspect or discard.
+
+## Commit modes
+
+By default the Broker commits the whole workspace after each turn, authored by the
+agent that spoke. Pass `--commit-mode agent-driven` and Duet injects **no commits
+at all**; instead each agent subprocess is spawned with `GIT_AUTHOR_NAME` /
+`GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` / `GIT_COMMITTER_EMAIL` set to that
+agent's name and `<agent>@duet.local`, so the commits it makes itself carry its
+identity.
+
+```bash
+duet run --repo ./app --isolate snapshot --commit-mode agent-driven \
+  "Split the migration into three reviewable commits, conventional-commit messages"
+```
+
+Use it when the task has its own required commit sequence and exact messages: a
+per-turn `Claude turn` squash would bury or mis-message them. The tradeoff is that
+nothing auto-commits — if an agent leaves the tree dirty, the transcript says so
+rather than papering over it.
+
+Both options follow Duet's precedence chain, so they can be set once per project:
+
+    CLI flag  >  DUET_ISOLATE / DUET_COMMIT_MODE  >  duet.toml [session]  >  default
+
+```toml
+[session]
+isolate = "snapshot"
+commit_mode = "agent-driven"
+```
+
+`connect` and `resume` always run against the real repo. They reattach live Claude
+and Codex CLI sessions, which cannot be resumed into a replica directory they have
+never seen, so they ignore an `isolate` default and stay in place.
 
 ## Cost tracking and budgets
 
