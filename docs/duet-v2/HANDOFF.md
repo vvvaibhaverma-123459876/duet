@@ -4,7 +4,7 @@
 
 - Branch: `claude/adoring-babbage-0ys7ui`. See `git log` for the exact HEAD
   (updated with each milestone commit).
-- Last completed milestone: **D01** (see `D01_REPORT.md`).
+- Last completed milestone: **D02** (see `D01_REPORT.md`, `D02_REPORT.md`).
 - `feat/isolate-modes` is merged in (`9db29f3`).
 - Suite after D01: 291 passed, 1 skipped as root; 289 passed, 3 skipped as
   non-root. The non-root packaging tests skip because that user cannot read
@@ -23,10 +23,11 @@ su ubuntu -s /bin/bash -c "cd /home/ubuntu/duet-ci && python3 -m pytest -q -p no
 
 ## Next safe step
 
-D02: the typed runtime core (`duet/runtime`): contracts, SQLite store with
-packaged migrations, reducer and state machines, outbox, fenced leases,
-approvals, and participant-bound identity, all with crash, replay and
-idempotency tests.
+D03: `duet/workspaces` (repo identity, input manifests, immutable snapshots,
+one-writer workspace leases on top of the D02 fenced leases) and
+`duet/verification` (argv checks with an allowlisted environment, evidence keyed
+to snapshot and acceptance hashes, mutation detection, controller-only
+completion predicate, review obligations).
 
 ## Uncommitted files
 

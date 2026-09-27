@@ -29,15 +29,15 @@ compatibility.
 | R01 | Partnership with evidenced contributions | D05, D06, D10 | LEGACY_PARTIAL (v1 requires "spoke", not substantive) |
 | R02 | Original-session continuity | D05, D12 | NOT_STARTED (v1 `--attach` resumes, which may fork) |
 | R03 | Two-way initiative | D05 | NOT_STARTED |
-| R04 | One objective/contract | D02, D06 | NOT_STARTED |
-| R05 | Bounded autonomy | D02, D03 | LEGACY_PARTIAL (branch isolation only) |
+| R04 | One objective/contract | D02, D06 | TESTED_SIM (runtime: one run, versioned acceptance contract, user-only changes); scheduler: D06 |
+| R05 | Bounded autonomy | D02, D03 | TESTED_SIM (runtime: principal-bound authority, narrowing-only project policy); workspace enforcement: D03 |
 | R06 | Honest resources | D01, D07 | LEGACY: TESTED_SIM (nullable cost, unknown turns counted separately, invalid costs rejected); v2 ledger NOT_STARTED |
 | R07 | Completion reserve | D08 | NOT_STARTED |
 | R08 | Supported controls only | D04, D09 | NOT_STARTED |
 | R09 | Evidence-based completion | D01, D03, D10 | LEGACY: TESTED_SIM (`success` requires a passing verifier; DONE alone is `unverified`); v2 NOT_STARTED |
 | R10 | Revision integrity | D03, D10 | NOT_STARTED |
 | R11 | Safe writes | D03, D11 | LEGACY_PARTIAL (lock + branch/worktree) |
-| R12 | Recoverability | D02, D11 | LEGACY_PARTIAL (resume manifest) |
+| R12 | Recoverability | D02, D11 | TESTED_SIM (runtime: atomic transactions, IN_DOUBT reconciliation, no blind re-dispatch); full crash matrix: D11 |
 | R13 | No silent paid fallback | D04, D08 | LEGACY_PARTIAL (no fallback exists) |
 | R14 | No weakened standards | D01, D08 | LEGACY: TESTED_SIM (solo mode yields `review_pending`); v2 NOT_STARTED |
 | R15 | Compatibility | D01, D13 | LEGACY_PARTIAL (documented outcome/exit-code change D-002; v1 transcript migration) |
@@ -49,8 +49,8 @@ compatibility.
 | AT01 | Launch from existing Claude | D05 | | NOT_STARTED |
 | AT02 | Launch from existing Codex | D05 | | NOT_STARTED |
 | AT03 | DUET launches both managed | D05 | | NOT_STARTED |
-| AT04 | Both ask while waiting | D05 | | NOT_STARTED |
-| AT05 | Redelivery/reconnect | D02/D05 | | NOT_STARTED |
+| AT04 | Both ask while waiting | D05 | `TestMessaging::test_bidirectional_questions_do_not_block` (store level) | PARTIAL: runtime semantics TESTED_SIM; wait/wake over MCP: D05 |
+| AT05 | Redelivery/reconnect | D02/D05 | `test_runtime_api.py::TestMessaging::test_redelivery_until_acknowledged`, idempotent send | TESTED_SIM (store level); reconnect over the endpoint: D05 |
 | AT06 | Live delivery unsupported | D12 | | NOT_STARTED |
 | AT07 | Peer quota before mandatory review | D08 | | NOT_STARTED |
 | AT08 | Unknown usage | D07 | | NOT_STARTED |
@@ -74,11 +74,11 @@ compatibility.
 | AT26 | Dirty active checkout | D03 | | LEGACY_PARTIAL (clean-tree check, `--allow-dirty` stash) |
 | AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | | NOT_STARTED |
 | AT28 | Concurrent writers | D11 | | NOT_STARTED |
-| AT29 | Crash around dispatch | D02/D11 | | NOT_STARTED |
+| AT29 | Crash around dispatch | D02/D11 | `test_crash_mid_transaction_leaves_no_partial_state`, `test_in_doubt_is_never_redispatched`, `test_reconcile_uses_process_identity_not_just_expiry` | TESTED_SIM (runtime); provider-level: D11 |
 | AT30 | Crash during commit/integration | D11 | | NOT_STARTED |
 | AT31 | Cancel while waiting/working/verifying | D04/D11 | `test_process.py` interrupt/timeout, `TestInterrupt`, battery `test_interrupt_leaves_a_resumable_manifest` | LEGACY: TESTED_SIM (working); waiting/verifying: v2 |
 | AT32 | PID reuse / unrelated sessions | D11 | | LEGACY_PARTIAL (`stop` confirms; name matching) |
-| AT33 | Peer text claims user approval | D02/D13 | | NOT_STARTED |
+| AT33 | Peer text claims user approval | D02/D13 | `TestAuthority::test_peer_text_cannot_grant_approval` | TESTED_SIM (runtime); end-to-end over MCP: D05/D13 |
 | AT34 | Malformed/flooded provider output | D04 | `test_process.py::test_flooding_child_is_bounded_at_capture`, `TestAdapter::test_json_output_over_the_cap_is_a_structured_failure` | LEGACY: TESTED_SIM; v2 streaming adapters: D04 |
 | AT35 | Unknown/failed/skipped required check | D03/D10 | | NOT_STARTED |
 | AT36 | Inputs mutate during verification | D03 | | NOT_STARTED |

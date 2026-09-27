@@ -82,3 +82,35 @@ Resolution order: `DUET_STATE_DIR`, then `$XDG_STATE_HOME/duet` (default
 on macOS. The directory is created `0700`, and startup refuses one that is
 group- or world-writable. Repositories hold at most a non-secret run pointer
 under `.duet/`. The existing `runs.json` registry stays where it is for v1.
+
+## D-010: Event-sourced reducer over materialised tables (D02)
+
+Every change is an `Event` applied by the pure `duet.runtime.reducer.apply`,
+which reads current rows through a getter and returns full rows. The store
+writes those rows and appends the event in one `BEGIN IMMEDIATE` transaction.
+IDs, sequence numbers and timestamps are produced by the API layer and carried
+in the event, so `Store.verify_replay()` can rebuild the tables from the log
+and diff them. `idempotency_keys` is the only non-replayed table: it caches
+responses.
+
+## D-011: Principals (D02)
+
+There are three principal kinds. `user` is the local operator, from the CLI.
+`controller` is Duet's own dispatcher. `participant` is an agent and exists
+only as the result of `authenticate(token)`. User-only operations: create
+runs, grant or revoke approvals, change the acceptance contract, cancel
+required work, and switch to explicit solo. Controller-only operations: mark
+tasks VERIFIED, establish COMPLETED_VERIFIED, plan, dispatch and record
+actions. Participants act only within their own run; the sender, owner and run
+are derived from their token.
+
+## D-012: Leases, fencing and process identity (D02)
+
+Leases carry a fencing token that increases by one on every acquisition.
+Writes that depend on ownership (task owner transitions, action outcomes)
+present the token, and a superseded or expired token raises `StaleLease`.
+Lease owners that are Duet processes are recorded as `host|boot_id|pid|start`,
+so a reused PID or a reboot never looks like the old owner. `reconcile()`
+releases dead or expired leases and moves in-flight actions to `IN_DOUBT`.
+IN_DOUBT is settled only by `resolve_in_doubt` with a reconciliation record,
+and there is no transition back to dispatch.

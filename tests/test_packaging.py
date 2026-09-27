@@ -47,6 +47,7 @@ def test_wheel_contains_packaged_defaults(tmp_path):
     wheel = _build_wheel(tmp_path)
     names = zipfile.ZipFile(wheel).namelist()
     assert "duet/resources/default_config.toml" in names
+    assert any(n.startswith("duet/runtime/migrations/") and n.endswith(".sql") for n in names)
 
 
 def test_installed_wheel_runs_without_source_tree(tmp_path):
@@ -63,3 +64,7 @@ def test_installed_wheel_runs_without_source_tree(tmp_path):
         proc = subprocess.run([str(python), "-m", "duet", *argv], cwd=work, env=env, capture_output=True, text=True, timeout=60)
         assert proc.returncode == 0, (argv, proc.stdout, proc.stderr)
     assert "[agents.claude]" in (work / "duet.toml").read_text()
+    # The runtime database migrates from packaged SQL, outside any source tree.
+    code = "from duet.runtime.store import Store; import sys; print(Store(sys.argv[1]).schema_version())"
+    proc = subprocess.run([str(python), "-c", code, str(tmp_path / "rt.db")], cwd=work, env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0 and int(proc.stdout.strip()) >= 1, proc.stderr
