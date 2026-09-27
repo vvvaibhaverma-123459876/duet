@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .runtime.contracts import TERMINAL_RUN, DomainError, RunLifecycle
 
-V2_COMMANDS = {"pair", "mcp", "service", "usage"}
+V2_COMMANDS = {"pair", "mcp", "service", "usage", "routing"}
 
 
 def add_parsers(sub) -> None:
@@ -69,6 +69,31 @@ def add_usage_parser(sub) -> None:
     set_.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
 
 
+def add_routing_parser(sub) -> None:
+    routing = sub.add_parser("routing", help="model and effort routing: decisions with reasons, pins and profile maps (v2)")
+    routing.add_argument("--run", default=None, metavar="RUN_ID", help="show this run's routing decisions")
+    routing.add_argument("--json", action="store_true", help="versioned JSON output")
+    routing.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    routing_sub = routing.add_subparsers(dest="routing_command")
+    profiles = ["routine", "standard", "deep", "critical_review"]
+    pin = routing_sub.add_parser("pin", help="pin a provider's model/effort or bound its profiles (DUET never edits the provider's own settings)")
+    pin.add_argument("--provider", required=True, choices=["claude", "codex"])
+    pin.add_argument("--model", default=None)
+    pin.add_argument("--effort", default=None)
+    pin.add_argument("--min-profile", default=None, choices=profiles)
+    pin.add_argument("--max-profile", default=None, choices=profiles)
+    pin.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    unpin = routing_sub.add_parser("unpin", help="remove a provider's pin")
+    unpin.add_argument("--provider", required=True, choices=["claude", "codex"])
+    unpin.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+    map_ = routing_sub.add_parser("map", help="map a logical profile to a provider model/effort (omit both to remove)")
+    map_.add_argument("--provider", required=True, choices=["claude", "codex"])
+    map_.add_argument("--profile", required=True, choices=profiles)
+    map_.add_argument("--model", default=None)
+    map_.add_argument("--effort", default=None)
+    map_.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+
+
 def extend_legacy(status_parser, stop_parser, resume_parser=None) -> None:
     status_parser.add_argument("--run", default=None, metavar="RUN_ID", help="show a v2 pair run instead of detecting sessions")
     status_parser.add_argument("--json", action="store_true", help="with --run: versioned JSON output")
@@ -99,6 +124,8 @@ def dispatch(args) -> int:
             return _usage(args)
         if args.command == "resume":
             return _resume(args)
+        if args.command == "routing":
+            return _routing(args)
         if args.command == "status":
             return _run_status(args)
         if args.command == "stop":
@@ -189,6 +216,10 @@ def format_status(status: dict) -> str:
         lines.append(f"  finishing reserve: {item['purpose']} on {item['pool']} ({item['provider']}): {item['held']} held for {item['units_left']} turn(s){short}")
     for hold in admission.get("holds", []):
         lines.append(f"  {hold['provider']} paused for quota ({hold['state']}) until {hold['resume_at'] or 'unknown'}: {hold['reason'][:100]}")
+    for participant_id, record in (status.get("routing") or {}).get("latest", {}).items():
+        setting = f"model={record['model'] or 'default'} effort={record['effort'] or 'default'}"
+        lines.append(f"  routing {record['provider']} ({record['role']}): {record['profile']} [{record['coverage']}] {setting}"
+                     + ("" if record["action"] == "run" else f", action {record['action']}") + ("" if record["floor_met"] else " (below floor: user pin)"))
     lines.append(f"  profile: {status['profile']}")
     return "\n".join(lines)
 
@@ -313,6 +344,42 @@ def _resume(args) -> int:
         coordinator = _local_coordinator(paths)
         run = coordinator.budget.resume(args.run, reason=f"{args.reason} (service not running: managed peers are not attached)")
     print(f"resumed {args.run}: {run['lifecycle']}")
+    return 0
+
+
+def _routing(args) -> int:
+    from .runtime.contracts import USER
+
+    paths = _paths(args)
+    control = _local_coordinator(paths).routing
+    command = getattr(args, "routing_command", None)
+    if command == "pin":
+        print(json.dumps(control.pin(USER, args.provider, model=args.model, effort=args.effort, min_profile=args.min_profile, max_profile=args.max_profile)))
+        return 0
+    if command == "unpin":
+        control.pin(USER, args.provider)
+        print(f"unpinned {args.provider}")
+        return 0
+    if command == "map":
+        print(json.dumps(control.map(USER, args.provider, args.profile, model=args.model, effort=args.effort)))
+        return 0
+    report = {"schema": "duet.routing/1", "pins": [p.__dict__ for p in control.pins()], "maps": [c.to_dict() for c in control.user_map()], "run": None}
+    if args.run:
+        report["run"] = control.status(args.run)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    for pin in report["pins"]:
+        bounds = ", ".join(f"{k}={v}" for k, v in pin.items() if v and k != "provider")
+        print(f"pin {pin['provider']}: {bounds}")
+    for item in report["maps"]:
+        print(f"map {item['provider']} {item['profile']}: model={item['model'] or 'default'} effort={item['effort'] or 'default'}")
+    if not report["pins"] and not report["maps"]:
+        print("no pins or profile maps: DUET maps profiles to each provider's own effort levels and leaves models at their defaults")
+    if report["run"] is not None:
+        from .routing.explain import format_records
+
+        print(format_records(report["run"]["decisions"]) or "no routing decisions recorded for this run")
     return 0
 
 

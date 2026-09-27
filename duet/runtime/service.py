@@ -547,7 +547,7 @@ class RuntimeService:
         if op == "request_review":
             return co.request_review(principal, **_only(args, {"snapshot_id", "note", "criteria"}))
         if op == "request_profile":
-            return co.request_profile(principal, **_only(args, {"model", "effort", "reason"}))
+            return co.request_profile(principal, **_only(args, {"profile", "model", "effort", "reason"}))
         if op == "status":
             return co.status(principal)
         raise ValidationError(f"unknown op {op!r}")

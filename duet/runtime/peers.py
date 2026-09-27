@@ -29,7 +29,7 @@ import time
 from decimal import Decimal
 
 from ..adapters import AgentError, AuthError, BillingError, QuotaError
-from ..providers.base import ProviderAdapter, TurnRequest, TurnResult
+from ..providers.base import ProviderAdapter, SettingsRecord, TurnRequest, TurnResult, UnsupportedSetting
 from .contracts import CONTROLLER, TERMINAL_RUN, ActionState, DomainError, Liveness, MessageKind, MessageState, RunLifecycle, TaskState
 from .pairing import MAX_WAIT_SECONDS, PairCoordinator, other_provider
 from .pools import PoolStore
@@ -43,6 +43,15 @@ log = logging.getLogger("duet.peers")
 DEFAULT_TURN_TIMEOUT = 900.0
 POLL_SECONDS = 1.0
 FALLBACK_PREFIX = "[DUET: delivered from the end of the peer's turn because it did not reply with duet_send] "
+
+
+ROUTING_ADVICE = {
+    "diagnose_environment": ("The last failure looks environmental (a missing tool, module or permission), not a reasoning problem: "
+                             "repair or report the environment first; a stronger model would not help."),
+    "clarify": "The requirement looks unclear: state an explicit assumption, or ask your peer or the user one precise question.",
+    "replan": ("Repairs under this approach have failed repeatedly: propose a different approach with duet_propose_plan "
+               "instead of another attempt of the same kind."),
+}
 
 
 def _terminal(lifecycle: str) -> bool:
@@ -123,6 +132,10 @@ class ManagedPeer:
         self.pools = PoolStore(coordinator.runtime)
         self.book = coordinator.budget.book  # one admission policy per service
         self._budget_cap: bool | None = None
+        self._caps: Any = None
+        self._caps_probed = False
+        self._rejected_models: set[str] = set()
+        self._rejected_efforts: set[str] = set()
         self._readings: list[dict] = []
         from ..usage.ledger import Ledger
 
@@ -256,13 +269,42 @@ class ManagedPeer:
             return "required", "discussion"
         return "optional", "investigate"
 
+    def _capabilities(self):
+        """D04 discovery, once per peer. None when the adapter cannot say:
+        routing then leaves the provider's own defaults alone."""
+        if not self._caps_probed:
+            self._caps_probed = True
+            try:
+                self._caps = self.adapter.capabilities()
+            except Exception:
+                log.info("%s capabilities unavailable", self.provider, exc_info=True)
+                self._caps = None
+        return self._caps
+
     def _provider_budget_cap(self) -> bool:
         if self._budget_cap is None:
-            try:
-                self._budget_cap = bool(self.adapter.capabilities().provider_budget_cap)
-            except Exception:
-                self._budget_cap = False
+            self._budget_cap = bool(getattr(self._capabilities(), "provider_budget_cap", False))
         return self._budget_cap
+
+    def _route(self, purpose: str):
+        """Model and effort for this turn (D09). Routing never blocks a turn:
+        without a decision the provider's defaults apply."""
+        try:
+            return self.co.routing.decide(
+                run_id=self.run_id, participant_id=self.participant_id, purpose=purpose, turn_index=self.turns,
+                capabilities=self._capabilities(), rejected_models=frozenset(self._rejected_models), rejected_efforts=frozenset(self._rejected_efforts),
+            )
+        except Exception:
+            log.exception("routing failed for %s; using the provider's defaults", self.provider)
+            return None, None
+
+    def _routed(self, decision_id: str | None, **outcome) -> None:
+        if decision_id is None:
+            return
+        try:
+            self.co.routing.record_outcome(decision_id, **outcome)
+        except Exception:
+            log.exception("could not record the routing outcome")
 
     def _refresh_quota(self) -> None:
         """Before retrying after a quota pause, read the provider's quota
@@ -320,6 +362,7 @@ class ManagedPeer:
         messages again later: paused or waiting) or "stop"."""
         runtime = self.co.runtime
         action_class, purpose = self._classify(messages)
+        decision_id, routing = self._route(purpose)
         self._refresh_quota()
         try:
             admitted = self.book.admit(
@@ -352,8 +395,11 @@ class ManagedPeer:
         runtime.record_action(CONTROLLER, action_id, ActionState.RUNNING, fence=fence)
         writer = self._is_writer()
         settings = self.co.settings(self.run_id)
+        enforce = routing is not None and routing.coverage != "advisory"
         request = TurnRequest(
-            prompt=self._prompt(messages, writer),
+            prompt=self._prompt(messages, writer, routing),
+            model=routing.model if enforce else None,
+            effort=routing.effort if enforce else None,
             cwd=Path(settings.workspace_path),
             session_id=self.session_id,
             permission_profile="workspace_write" if writer else "read_only",
@@ -368,8 +414,21 @@ class ManagedPeer:
         self._readings = []
         try:
             result = self.adapter.run_turn(request, cancel=self._stop)
+        except UnsupportedSetting as exc:
+            # Refused before dispatch: nothing ran. Exclude the setting and
+            # route again (an explicit downgrade, with the evidence recorded).
+            runtime.record_action(CONTROLLER, action_id, ActionState.FAILED, fence=fence, result={"error": str(exc)[:2000], "kind": "unsupported_setting"})
+            self._routed(decision_id, status="rejected", action_id=action_id, error=str(exc),
+                         settings=SettingsRecord({"model": request.model, "effort": request.effort}, {}, {}))
+            if request.effort is not None:
+                self._rejected_efforts.add(request.effort)
+            if request.model is not None and (request.effort is None or "model" in str(exc).lower()):
+                self._rejected_models.add(request.model)
+            self.turns -= 1
+            return "retry"
         except QuotaError as exc:
             runtime.record_action(CONTROLLER, action_id, ActionState.FAILED, fence=fence, result={"error": str(exc)[:2000], "kind": exc.kind})
+            self._routed(decision_id, status="failed", action_id=action_id, error=str(exc))
             self._quota_failure(exc.kind, str(exc))
             return "retry"
         except (AuthError, BillingError) as exc:
@@ -387,6 +446,8 @@ class ManagedPeer:
             raise
         self.results.append(result)
         outcome = ActionState.SUCCEEDED if result.ok else ActionState.FAILED
+        self._routed(decision_id, status="succeeded" if result.ok else "failed", action_id=action_id, settings=result.settings,
+                     error=None if result.ok else str(result.error or result.status))
         self._record_quota(result)
         actuals = self._record_usage(action_id, result)
         runtime.record_action(
@@ -504,7 +565,7 @@ class ManagedPeer:
 
     # -- prompt ----------------------------------------------------------------------------
 
-    def _prompt(self, messages: list[dict], writer: bool) -> str:
+    def _prompt(self, messages: list[dict], writer: bool, routing=None) -> str:
         run = self.co.runtime.get_run(CONTROLLER, self.run_id)
         settings = self.co.settings(self.run_id)
         checks = [" ".join(c.get("argv") or [c.get("shell", "")]) for c in run["acceptance"].get("checks", [])]
@@ -530,6 +591,9 @@ class ManagedPeer:
             suggestions = self.co.graph.next_for(self.principal)[:3]
         except Exception:
             suggestions = []
+        advice = ROUTING_ADVICE.get(getattr(routing, "action", "run"))
+        if advice:
+            lines += ["", "## DUET routing", advice, routing.explanation]
         if suggestions:
             lines += ["", "## DUET suggests (highest priority first)"]
             lines += [f"- {s['action']}" + (f" {s['task_id']}" if s.get("task_id") else "") + f": {s['reason']}" for s in suggestions]

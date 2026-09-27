@@ -164,6 +164,17 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
         "provider",
         ("provider", "state", "reason", "resume_at", "attempts", "probe_action_id", "placed_at", "updated_at"),
     ),
+    # D09: routing (migration 0007)
+    "routing_decisions": (
+        "decision_id",
+        (
+            "decision_id", "run_id", "participant_id", "provider", "task_id", "task_revision", "role", "purpose", "turn_index",
+            "action", "profile", "model", "effort", "coverage", "floor_met", "escalated", "requested_by", "action_id",
+            "detail_json", "outcome_json", "created_at", "updated_at",
+        ),
+    ),
+    "routing_pins": ("provider", ("provider", "model", "effort", "min_profile", "max_profile", "set_by", "created_at", "updated_at")),
+    "routing_maps": ("map_id", ("map_id", "provider", "profile", "model", "effort", "set_by", "created_at", "updated_at")),
     "admissions": (
         "admission_id",
         ("admission_id", "run_id", "participant_id", "action_id", "provider", "action_class", "purpose", "verdict", "reason", "detail_json", "created_at"),
@@ -1082,6 +1093,70 @@ def _admission_decided(p: dict, e: Event, get: Getter) -> list[Upsert]:
     ]
 
 
+_ROUTING_PROFILES = ("routine", "standard", "deep", "critical_review")
+
+
+def _routing_decided(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if get("routing_decisions", p["decision_id"]) is not None:
+        raise InvalidTransition(f"routing decision {p['decision_id']} already exists")
+    if p["profile"] not in _ROUTING_PROFILES:
+        raise ValidationError(f"profile must be one of {_ROUTING_PROFILES}")
+    return [
+        (
+            "routing_decisions",
+            {
+                "decision_id": p["decision_id"], "run_id": p["run_id"], "participant_id": p["participant_id"], "provider": p["provider"],
+                "task_id": p.get("task_id"), "task_revision": p.get("task_revision"), "role": p["role"], "purpose": p["purpose"],
+                "turn_index": int(p["turn_index"]), "action": p["action"], "profile": p["profile"], "model": p.get("model"),
+                "effort": p.get("effort"), "coverage": p["coverage"], "floor_met": 1 if p["floor_met"] else 0,
+                "escalated": 1 if p["escalated"] else 0, "requested_by": p["requested_by"], "action_id": None,
+                "detail_json": _j(p.get("detail", {})), "outcome_json": None, "created_at": e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _routing_outcome(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    row = _require(get, "routing_decisions", p["decision_id"])
+    if p.get("action_id"):
+        row["action_id"] = p["action_id"]
+    row.update(outcome_json=_j(p["outcome"]), updated_at=e.at)
+    return [("routing_decisions", row)]
+
+
+def _routing_pinned(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    for key in ("min_profile", "max_profile"):
+        if p.get(key) is not None and p[key] not in _ROUTING_PROFILES:
+            raise ValidationError(f"{key} must be one of {_ROUTING_PROFILES}")
+    existing = get("routing_pins", p["provider"])
+    return [
+        (
+            "routing_pins",
+            {
+                "provider": p["provider"], "model": p.get("model"), "effort": p.get("effort"), "min_profile": p.get("min_profile"),
+                "max_profile": p.get("max_profile"), "set_by": p["set_by"],
+                "created_at": existing["created_at"] if existing else e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
+def _routing_mapped(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    if p["profile"] not in _ROUTING_PROFILES:
+        raise ValidationError(f"profile must be one of {_ROUTING_PROFILES}")
+    existing = get("routing_maps", p["map_id"])
+    return [
+        (
+            "routing_maps",
+            {
+                "map_id": p["map_id"], "provider": p["provider"], "profile": p["profile"], "model": p.get("model"), "effort": p.get("effort"),
+                "set_by": p["set_by"], "created_at": existing["created_at"] if existing else e.at, "updated_at": e.at,
+            },
+        )
+    ]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -1129,6 +1204,10 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "quota.probe": _quota_probe,
     "quota.released": _quota_released,
     "admission.decided": _admission_decided,
+    "routing.decided": _routing_decided,
+    "routing.outcome": _routing_outcome,
+    "routing.pinned": _routing_pinned,
+    "routing.mapped": _routing_mapped,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

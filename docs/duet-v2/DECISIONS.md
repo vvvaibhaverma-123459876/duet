@@ -422,3 +422,34 @@ validators. D04 code is unchanged.
   stays alive for `PAUSED_QUOTA` runs, and its monitor resumes them
   (RECONCILING, then the state the main task implies).
 
+
+## D-030: Adaptive model and effort routing (D09)
+
+- Routing is a pure policy (`duet/routing`): the same request always gives
+  the same decision. The runtime (`duet/runtime/routing_control.py`) builds
+  the request from the store: the task's changed and protected paths, its
+  checks, its failures with their output, the participant's previous
+  decisions and outcomes, the provider's discovered controls, the user's
+  pins and profile maps, and pressure from admission (D08).
+- There are four logical profiles: routine, standard, deep and
+  critical_review. Each is mapped per provider at run time: first from the
+  user's own maps (`duet routing map`), otherwise from that provider's own
+  discovered effort labels, ranked on its own documented scale. There are no
+  built-in model names, and effort labels are never compared across
+  providers. The provider default always remains a valid candidate.
+- Risk comes from what the change touches, not its size (AT16). An agent
+  can raise scrutiny and never lower it. Budget pressure lowers a target
+  towards the floor, never below it. A user pin is respected even below the
+  floor; the decision then records `floor_met: false`.
+- Failures are classified before any escalation. An environment failure
+  is diagnosed, not escalated (AT19); an unclear requirement asks for an
+  assumption or a question; repeated hypothesis failures trigger a re-plan
+  and at most one escalation per task.
+- Settings change only at a turn boundary (a managed turn). For a native
+  session the decision is advice (coverage `advisory`), because DUET cannot
+  change a native client's model (AT41). A setting the provider refuses
+  before dispatch is excluded with its evidence and the turn is re-routed
+  (an explicit downgrade). What the provider accepted and observed is
+  recorded next to what was requested, and differences are flagged (AT17).
+- Routing never selects another provider or participant, so it can never
+  replace the second provider's obligation to save cost.

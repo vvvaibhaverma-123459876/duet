@@ -194,10 +194,12 @@ class PairCoordinator:
         self._checks_running: dict[str, threading.Thread] = {}  # checks still executing
         self._check_threads: dict[str, threading.Thread] = {}  # including their follow-up
         from .budgeting import Budgeting
+        from .routing_control import RoutingControl
         from .taskgraph import TaskGraph
 
         self.graph = TaskGraph(self)
         self.budget = Budgeting(self)
+        self.routing = RoutingControl(self)
 
     # ------------------------------------------------------------------ notification
 
@@ -547,7 +549,8 @@ class PairCoordinator:
             "interventions": interventions,
             "verification": verification,
             "admission": self.budget.status(run_id),
-            "profile": "fixed (peer-alpha): no adaptive model or effort routing",
+            "routing": self.routing.status(run_id),
+            "profile": "routed per turn by task risk (D09): enforced for managed sessions, advice for native ones",
             "control_coverage": (
                 "DUET bounds the turns, checks and messages it schedules. Work a native session does outside these "
                 "tools, and anything else run under the same account, is not controlled or counted."
@@ -765,6 +768,11 @@ class PairCoordinator:
             )
         else:
             view["rules"] = "Do not edit files. Produce the result (findings, a test plan, a review) and call duet_complete_task with it."
+        if self._participant(principal.id)["origin"] != "managed":
+            # A native session keeps its own settings: routing is advice (D09).
+            advice = self.routing.advise(run_id, principal.id, "implement" if claimed["kind"] in WRITE_KINDS else "investigate")
+            if advice is not None:
+                view["routing"] = advice
         return view
 
     def submit(self, principal: Principal, *, task_id: str | None = None, summary: str = "", request_review: bool = True, note: str = "") -> dict:
@@ -857,17 +865,11 @@ class PairCoordinator:
         self.notify()
         return {**receipt, "snapshot_id": snapshot_id, "reviewer": reviewer}
 
-    def request_profile(self, principal: Principal, *, model: str | None = None, effort: str | None = None, reason: str = "") -> dict:
+    def request_profile(self, principal: Principal, *, profile: str | None = None, model: str | None = None, effort: str | None = None, reason: str = "") -> dict:
+        """Ask for a logical profile (D09). More scrutiny can be granted,
+        never less than the controller's floor; a native session gets advice."""
         self._require_participant(principal)
-        check_optional_text(model, "model", limit=MAX_ID)
-        check_optional_text(effort, "effort", limit=64)
-        check_text(reason, "reason", limit=MAX_TEXT, allow_empty=True)
-        return {
-            "decision": "declined",
-            "requested": {"model": model, "effort": effort},
-            "reason": "peer-alpha runs fixed, supported profiles; evidence-based model and effort routing is not implemented yet",
-            "applied": None,
-        }
+        return self.routing.request_profile(principal, profile=profile, model=model, effort=effort, reason=reason)
 
     # ------------------------------------------------------------------ checks and completion
 

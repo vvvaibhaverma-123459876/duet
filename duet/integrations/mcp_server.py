@@ -269,9 +269,13 @@ def build_server(session: ProxySession):
     async def duet_request_review(snapshot_id: str | None = None, note: str = "", criteria: list[str] | None = None) -> dict[str, Any]:
         return await run(session.call, "request_review", snapshot_id=snapshot_id, note=note, criteria=criteria)
 
-    @server.tool(description="Ask for a different model or effort with a reason. Peer-alpha runs fixed profiles, so this is declined with an explanation.")
-    async def duet_request_profile(model: str | None = None, effort: str | None = None, reason: str = "") -> dict[str, Any]:
-        return await run(session.call, "request_profile", model=model, effort=effort, reason=reason)
+    @server.tool(description=(
+        "Ask for more scrutiny on your work: a logical profile (routine, standard, deep, critical_review) with a reason. "
+        "DUET can raise your profile, never below the task's risk floor; a managed session gets it from its next turn, a native "
+        "session gets advice (DUET cannot change your client's model). Specific models are mapped by the user, not requested here."
+    ))
+    async def duet_request_profile(profile: str | None = None, reason: str = "", model: str | None = None, effort: str | None = None) -> dict[str, Any]:
+        return await run(session.call, "request_profile", profile=profile, model=model, effort=effort, reason=reason)
 
     @server.tool(description="Run status: participants and delivery modes, tasks, plans, contributions, open requests, checks, reviews, what completion still needs, and 'next': what DUET suggests you do.")
     async def duet_status() -> dict[str, Any]:
