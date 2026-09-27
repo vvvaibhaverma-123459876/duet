@@ -14,22 +14,7 @@ exercised with coordinator-level participants and emulated providers.
 | Authorship | `CompletionGate.authorship` | Per file, from content hashes: the author is whoever first submitted, or handed off, that exact content. Earlier different versions are recorded with their writers. |
 | Review coverage | `completion._reviews` | Every changed file needs an approval from someone who did not write it, from the other provider, whose scope covers the file. A co-edited file also needs each earlier writer's version approved by someone else, on the snapshot where it appeared. When several participants wrote the result, each writer acknowledges or approves the final snapshot. A change request blocks. |
 | Delta reviews | scope `basis:SNAPSHOT` | An approval of an earlier snapshot carries over to unchanged files only when a new approval of this snapshot names that snapshot as its basis. |
-| Reviews by the submitter | `evidence.submit_review` | The submitter may ackn
-
-
-
-
-
-
-
-
-
-
-
-
-
-
- the snapshot or review files it did not write, named explicitly. The gate decides per file whether the review counts. |
+| Reviews by the submitter | `evidence.submit_review` | The submitter may acknowledge the snapshot, or review files it did not write, named explicitly. The gate decides per file whether the review counts. |
 | Check reuse | `pairing._run_checks` | Passed evidence for the same snapshot, contract version and environment fingerprint is reused (the action is recorded as reused, and the status note says so). |
 | Final report | `duet/runtime/final_report.py`, `duet report --run RUN [--json]` | Deterministic `duet.final-report/1`: outcome, contract version, repository, base and deliverable commit, final snapshot and tree hash, each check (command, exit code, output hash, baseline), every review (scope, and whether it applies), per-file authorship, findings, routing coverage, reserves and holds, and each missing obligation with the next action. No model writes it. |
 
