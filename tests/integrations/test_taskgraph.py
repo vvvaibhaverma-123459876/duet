@@ -395,7 +395,12 @@ class TestReviewFindings:
         assert pair.lifecycle() != "COMPLETED_VERIFIED"
         assert pair.task(pair.main)["state"] == "REVIEW_REQUIRED"  # not stranded as VERIFIED
         item = next(i for i in co.gate.evaluate(pair.run_id, snap).items if i.name == "non_author_review")
-        assert not item.ok and "claude approved it but wrote part of this diff" in item.detail
+        assert not item.ok and "claude's earlier version" in item.detail
+        # D10: codex reviews claude's version (the snapshot taken at the handoff) with an explicit scope.
+        handoff = co.runtime.store.read().query("SELECT snapshot_id FROM snapshots WHERE author = ?", (pair.claude.id,))[0]["snapshot_id"]
+        co.send(pair.codex, kind="REVIEW_RESULT", body="mul() is right", snapshot_id=handoff, review={"disposition": "approve", "scope": ["calc.py"]})
+        co.try_complete(pair.run_id)
+        assert pair.lifecycle() == "COMPLETED_VERIFIED"
 
     # -- 4: plan decisions, proposals and claims are atomic
 

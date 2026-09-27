@@ -112,20 +112,29 @@ class Criterion:
     checks: tuple[str, ...] = ()
     required: bool = True
     review: bool = True  # needs a non-author review
+    # "change": new behaviour, shown by a check that fails without it (or an
+    # explicit review); "preserve": existing behaviour that must keep
+    # passing (a check green before and after is the right evidence). D10.
+    kind: str = "change"
 
     def __post_init__(self) -> None:
         if not ID_RE.match(self.id or ""):
             raise ValidationError(f"invalid criterion id {self.id!r}")
         check_text(self.description, f"criterion {self.id} description", limit=4096)
+        if self.kind not in ("change", "preserve"):
+            raise ValidationError(f"criterion {self.id} kind must be change or preserve")
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "description": self.description, "checks": list(self.checks), "required": self.required, "review": self.review}
+        data = {"id": self.id, "description": self.description, "checks": list(self.checks), "required": self.required, "review": self.review}
+        if self.kind != "change":  # omitted by default, so earlier contract hashes are unchanged
+            data["kind"] = self.kind
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "Criterion":
         if not isinstance(data, dict):
             raise ValidationError("criterion must be an object")
-        unknown = set(data) - {"id", "description", "checks", "required", "review"}
+        unknown = set(data) - {"id", "description", "checks", "required", "review", "kind"}
         if unknown:
             raise ValidationError(f"unknown criterion fields {sorted(unknown)}")
         return cls(
@@ -134,6 +143,7 @@ class Criterion:
             checks=tuple(data.get("checks") or ()),
             required=bool(data.get("required", True)),
             review=bool(data.get("review", True)),
+            kind=data.get("kind", "change"),
         )
 
 

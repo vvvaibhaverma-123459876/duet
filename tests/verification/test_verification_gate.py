@@ -22,6 +22,7 @@ from duet.verification.completion import (
     CompletionGate,
 )
 from duet.verification.evidence import EvidenceService
+from duet.verification.baseline import run_baseline
 from duet.verification.runner import build_env, run_check
 from duet.workspaces.manager import WorkspaceManager
 from duet.workspaces.repo import resolve_repo
@@ -54,7 +55,7 @@ def make_repo(path: Path) -> Path:
 CONTRACT = AcceptanceContract(
     criteria=(
         Criterion("AC1", "mul(a, b) returns the product", checks=("feature",)),
-        Criterion("AC2", "existing behaviour keeps working", checks=("existing",)),
+        Criterion("AC2", "existing behaviour keeps working", checks=("existing",), kind="preserve"),
     ),
     checks=(
         CheckSpec("feature", argv=(PY, "check_feature.py")),
@@ -95,6 +96,11 @@ class World:
 
     def verify(self, snap, snapshot_id, contract=None):
         contract = contract or self.contract
+        done = self.evidence.baselines_for(self.run_id, contract.hash())
+        for check_id in contract.required_checks():
+            if check_id not in done:
+                baseline = run_baseline(contract.check(check_id), self.repo, self.ws.base_sha, self.repo.parent / "baselines")
+                self.evidence.record_baseline(CONTROLLER, self.run_id, contract, self.ws.base_sha, baseline)
         for check_id in contract.required_checks():
             outcome = run_check(contract.check(check_id), self.ws.path, snapshot_before=snap)
             self.evidence.record_check(CONTROLLER, self.run_id, snapshot_id, contract, outcome)
@@ -272,7 +278,7 @@ class TestCompletion:
         world.verify(snap2, sid2)
         report = world.evaluate(snap2, sid2)
         review = item(report, "non_author_review")
-        assert not review.ok and "no longer apply" in review.detail
+        assert not review.ok and "do not apply" in review.detail
         assert report.outcome == IMPLEMENTED_REVIEW_PENDING
 
     def test_weakened_protected_check_blocks_completion(self, world):  # AT24

@@ -252,7 +252,7 @@ PARTICIPANT_OPS = frozenset(
         "handoff", "submit", "request_review", "request_profile", "status", "disconnect",
     }
 )
-CONTROLLER_OPS = frozenset({"pair", "run_status", "cancel", "resume", "runs", "shutdown"})
+CONTROLLER_OPS = frozenset({"pair", "run_status", "report", "cancel", "resume", "runs", "shutdown"})
 OPEN_OPS = frozenset({"ping", "join"})
 
 PeerFactory = Callable[["RuntimeService", str, str], Any]  # (service, run_id, provider) -> started peer
@@ -565,6 +565,10 @@ class RuntimeService:
             return self.coordinator.run_status(_text(args, "run_id"))
         if op == "cancel":
             return self.coordinator.cancel(_text(args, "run_id"), reason=str(args.get("reason") or "stopped by the user")[:500], principal=USER)
+        if op == "report":
+            from .final_report import build
+
+            return build(self.coordinator, _text(args, "run_id"))
         if op == "resume":
             return self.coordinator.budget.resume(_text(args, "run_id"), reason=str(args.get("reason") or "resumed by the user")[:500], principal=USER)
         if op == "pair":

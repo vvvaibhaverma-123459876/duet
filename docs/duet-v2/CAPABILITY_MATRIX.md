@@ -34,8 +34,8 @@ compatibility.
 | R06 | Honest resources | D01, D07 | TESTED_SIM (legacy nullable cost; v2 observations with quality/scope/epoch, unknown never zero, context and quota as gauges, deduplicated pool records, cumulative totals as deltas) |
 | R07 | Completion reserve | D08 | TESTED_SIM (review and repair turns reserved per provider when the pair forms; finishing turns draw once; optional work cannot touch reserves; quota loss keeps the review pending) |
 | R08 | Supported controls only | D04, D09 | TESTED_SIM (discovery; requested/accepted/observed recorded per routed turn, differences flagged; refused settings excluded with evidence; native sessions advisory) |
-| R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM: legacy (D01) and v2 predicate with controller-only finalisation (D03); joint authorship: D10 |
-| R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; mutation invalidates); delta reviews and caching: D10 |
+| R09 | Evidence-based completion | D01, D03, D10 | TESTED_SIM (predicate with criteria demonstrated by fail-to-pass or explicit review; per-file non-author coverage; deterministic final report) |
+| R10 | Revision integrity | D03, D10 | TESTED_SIM (evidence and reviews keyed to snapshot + contract hash; delta reviews need a recorded basis; reuse by fingerprint) |
 | R11 | Safe writes | D03, D11 | TESTED_SIM (strict worktree leaves the user checkout byte-identical; one fenced writer; explicit checked imports); integration locking: D11 |
 | R12 | Recoverability | D02, D11 | TESTED_SIM (runtime: atomic transactions, IN_DOUBT reconciliation, no blind re-dispatch); full crash matrix: D11 |
 | R13 | No silent paid fallback | D04, D08 | TESTED_SIM (no `--bare`, no API-key paths, billing errors never retried as quota; admission only admits, defers or pauses the same provider; quota pauses wait for the reset; an unenforceable cap pauses before paid work) |
@@ -66,11 +66,11 @@ compatibility.
 | AT18 | User pins model/effort | D09/D12 | `test_a_user_pin_is_respected_even_below_the_floor` | TESTED_SIM (D09 part) |
 | AT19 | Missing dependency failure | D09 | `test_an_environment_failure_is_diagnosed_not_escalated` | TESTED_SIM |
 | AT20 | Repeated no-progress repairs | D06/D09 | `test_repeated_failures_replan_then_pause` (D06), `test_repeated_hypothesis_failures_replan_with_one_bounded_escalation` | TESTED_SIM (D09 part) |
-| AT21 | Old green suite, feature absent | D01/D10 | legacy `test_suite_green_at_baseline_does_not_end_the_session`; v2 `test_green_existing_suite_without_the_feature_is_not_complete` | TESTED_SIM |
+| AT21 | Old green suite, feature absent | D01/D10 | `test_a_suite_green_before_the_change_does_not_demonstrate_the_criterion` | TESTED_SIM |
 | AT22 | DONE with missing verifier | D01 | `test_d01_semantics.py::TestCompletion::test_done_with_missing_verifier_is_unverified`, battery `test_scratch_run_without_verifier_is_unverified` | TESTED_SIM |
-| AT23 | Approval of old revision | D10 | `test_approval_of_an_old_snapshot_does_not_count` | TESTED_SIM (D03); delta-review rules: D10 |
-| AT24 | Agent edits acceptance policy | D03/D10 | `test_participants_cannot_change_the_contract`, `test_weakened_protected_check_blocks_completion`, `test_protected_paths_detect_weakened_tests` | TESTED_SIM |
-| AT25 | Joint authorship reviews | D10 | | NOT_STARTED |
+| AT23 | Approval of old revision | D10 | `test_an_approval_is_stale_after_a_change_unless_a_delta_review_names_its_basis` | TESTED_SIM |
+| AT24 | Agent edits acceptance policy | D03/D10 | `test_a_new_contract_version_voids_earlier_evidence` | TESTED_SIM |
+| AT25 | Joint authorship reviews | D10 | `test_joint_work_needs_per_file_review_and_both_acknowledgements` | TESTED_SIM |
 | AT26 | Dirty active checkout | D03 | `test_user_checkout_is_untouched`, `test_import_inputs_is_explicit_and_checked` | TESTED_SIM |
 | AT27 | Secret-bearing ignored file / escaping symlink | D03/D13 | `test_inputs_exclude_ignored_sensitive_and_escaping_links`, `test_import_inputs_is_explicit_and_checked`, `test_sensitive_classifier` | TESTED_SIM (D03); threat-model pass: D13 |
 | AT28 | Concurrent writers | D11 | | NOT_STARTED |
@@ -89,7 +89,7 @@ compatibility.
 | AT41 | Mid-turn setting change unsupported | D04/D09 | `test_native_sessions_get_advice`, `test_profile_requests_raise_managed_and_advise_native` | TESTED_SIM |
 | AT42 | Resume/fork semantics differ | D04/D12 | `test_resume_is_session_cumulative`, `test_fork_gets_new_id`, `test_resume_keeps_thread_and_fork_changes_it`, `test_lineage_labels` | TESTED_SIM (emulated); LIVE: NOT_RUN |
 | AT43 | No sandbox for borrowed session | D13 | | NOT_STARTED |
-| AT44 | Same snapshot checked twice | D10 | | NOT_STARTED |
+| AT44 | Same snapshot checked twice | D10 | `test_an_identical_snapshot_reuses_its_evidence` | TESTED_SIM |
 | AT45 | Native subagents spawn | D11 | | NOT_STARTED |
 | AT46 | Estimate overshoot before final usage | D08/D11 | `test_overshoot_is_recorded_not_hidden`, `test_in_doubt_turns_count_as_dispatched_with_unknown_cost` | TESTED_SIM (D08 part); crash matrix: D11 |
 | AT47 | Integration changes tested tree | D10/D11 | | NOT_STARTED |

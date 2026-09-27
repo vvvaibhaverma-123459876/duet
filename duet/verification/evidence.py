@@ -34,7 +34,7 @@ from ..workspaces.snapshots import Snapshot
 from .acceptance import AcceptanceContract
 from .runner import CheckOutcome
 
-DISPOSITIONS = ("approve", "changes_requested", "comment")
+DISPOSITIONS = ("approve", "changes_requested", "comment", "acknowledge")
 SEVERITIES = ("blocking", "non_blocking")
 
 
@@ -169,6 +169,8 @@ class EvidenceService:
                     "location": check_optional_text(item.get("location"), "finding location", limit=1024),
                 }
             )
+        if disposition == "acknowledge" and clean:
+            raise ValidationError("an acknowledgement carries no findings; use changes_requested")
         if disposition == "approve" and any(f["severity"] == "blocking" for f in clean):
             raise ValidationError("an approval cannot carry blocking findings; use changes_requested")
         with self.runtime.store.transaction() as tx:
@@ -176,9 +178,14 @@ class EvidenceService:
             self.runtime._bind_run(principal, snapshot["run_id"])
             run = self.runtime._live_run(tx, snapshot["run_id"])
             author = snapshot["author"]
+            explicit = scope != ["all"]
             if author == principal.id:
-                raise Unauthorized("the author of a change cannot review it")
-            if author is not None:
+                # The submitter may acknowledge the snapshot (joint work, D10)
+                # or review files it did not write, named explicitly; the gate
+                # decides per file whether that review counts.
+                if disposition != "acknowledge" and not explicit:
+                    raise Unauthorized("the author of a change cannot review it; name the files you did not write in review.scope")
+            elif author is not None and disposition != "acknowledge":
                 author_provider = tx.require("participants", author)["provider"]
                 if author_provider == principal.provider:
                     raise Unauthorized("a review must come from the other provider")
@@ -218,6 +225,25 @@ class EvidenceService:
                 )
             )
             return dict(tx.require("findings", finding_id))
+
+    def record_baseline(self, principal: Principal, run_id: str, contract: AcceptanceContract, base_sha: str, outcome: CheckOutcome) -> dict:
+        """What a required check said on the base commit (D10)."""
+        if principal.kind != "controller":
+            raise Unauthorized("only the controller records baselines")
+        contract.check(outcome.check_id)
+        baseline_id = f"{run_id}:{outcome.check_id}:{contract.hash()}"
+        with self.runtime.store.transaction() as tx:
+            tx.emit(self._event(
+                "baseline.recorded",
+                {"baseline_id": baseline_id, "run_id": run_id, "check_id": outcome.check_id, "acceptance_hash": contract.hash(), "base_sha": base_sha,
+                 "status": outcome.status, "exit_code": outcome.exit_code, "output_hash": outcome.output_hash or None, "detail": outcome.detail},
+                principal, run_id,
+            ))
+            return dict(tx.require("baselines", baseline_id))
+
+    def baselines_for(self, run_id: str, acceptance_hash: str) -> dict[str, dict]:
+        rows = self.runtime.store.read().query("SELECT * FROM baselines WHERE run_id = ? AND acceptance_hash = ?", (run_id, acceptance_hash))
+        return {row["check_id"]: dict(row) for row in rows}
 
     def reviews_for(self, run_id: str, snapshot_id: str, acceptance_hash: str) -> list[dict]:
         rows = self.runtime.store.read().query(

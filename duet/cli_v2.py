@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .runtime.contracts import TERMINAL_RUN, DomainError, RunLifecycle
 
-V2_COMMANDS = {"pair", "mcp", "service", "usage", "routing"}
+V2_COMMANDS = {"pair", "mcp", "service", "usage", "routing", "report"}
 
 
 def add_parsers(sub) -> None:
@@ -67,6 +67,13 @@ def add_usage_parser(sub) -> None:
              "provider_cap: the provider must enforce it per call (Claude cost only), otherwise the run pauses before any work",
     )
     set_.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
+
+
+def add_report_parser(sub) -> None:
+    report = sub.add_parser("report", help="the deterministic final report of a v2 run: revisions, checks, reviews, and what is still missing")
+    report.add_argument("--run", required=True, metavar="RUN_ID")
+    report.add_argument("--json", action="store_true", help="versioned JSON (duet.final-report/1)")
+    report.add_argument("--state-root", default=None, help=argparse.SUPPRESS)
 
 
 def add_routing_parser(sub) -> None:
@@ -126,6 +133,8 @@ def dispatch(args) -> int:
             return _resume(args)
         if args.command == "routing":
             return _routing(args)
+        if args.command == "report":
+            return _report(args)
         if args.command == "status":
             return _run_status(args)
         if args.command == "stop":
@@ -345,6 +354,16 @@ def _resume(args) -> int:
         run = coordinator.budget.resume(args.run, reason=f"{args.reason} (service not running: managed peers are not attached)")
     print(f"resumed {args.run}: {run['lifecycle']}")
     return 0
+
+
+def _report(args) -> int:
+    from .runtime.final_report import build, render_markdown
+    from .runtime.service import service_running
+
+    paths = _paths(args)
+    report = _controller(paths).call("report", run_id=args.run) if service_running(paths) else build(_local_coordinator(paths), args.run)
+    print(json.dumps(report, indent=2, default=str) if args.json else render_markdown(report))
+    return 0 if report["outcome"] == "COMPLETED_VERIFIED" else 2
 
 
 def _routing(args) -> int:

@@ -175,6 +175,11 @@ TABLES: dict[str, tuple[str, tuple[str, ...]]] = {
     ),
     "routing_pins": ("provider", ("provider", "model", "effort", "min_profile", "max_profile", "set_by", "created_at", "updated_at")),
     "routing_maps": ("map_id", ("map_id", "provider", "profile", "model", "effort", "set_by", "created_at", "updated_at")),
+    # D10: baselines (migration 0008)
+    "baselines": (
+        "baseline_id",
+        ("baseline_id", "run_id", "check_id", "acceptance_hash", "base_sha", "status", "exit_code", "output_hash", "detail", "created_at"),
+    ),
     "admissions": (
         "admission_id",
         ("admission_id", "run_id", "participant_id", "action_id", "provider", "action_class", "purpose", "verdict", "reason", "detail_json", "created_at"),
@@ -1157,6 +1162,13 @@ def _routing_mapped(p: dict, e: Event, get: Getter) -> list[Upsert]:
     ]
 
 
+def _baseline_recorded(p: dict, e: Event, get: Getter) -> list[Upsert]:
+    _require(get, "runs", p["run_id"])
+    if get("baselines", p["baseline_id"]) is not None:
+        return []  # recorded once per run, check and contract version
+    return [("baselines", {k: p.get(k) for k in ("baseline_id", "run_id", "check_id", "acceptance_hash", "base_sha", "status", "exit_code", "output_hash", "detail")} | {"created_at": e.at})]
+
+
 _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "policy.registered": _policy_registered,
     "run.created": _run_created,
@@ -1208,6 +1220,7 @@ _HANDLERS: dict[str, Callable[[dict, Event, Getter], list[Upsert]]] = {
     "routing.outcome": _routing_outcome,
     "routing.pinned": _routing_pinned,
     "routing.mapped": _routing_mapped,
+    "baseline.recorded": _baseline_recorded,
 }
 EVENT_TYPES = frozenset(_HANDLERS)
 

@@ -19,6 +19,8 @@ Rules for this vertical slice (spec 5, D05):
   peer's credentials cannot create runs or peers (no recursive pairing)."""
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import secrets
@@ -33,7 +35,8 @@ from typing import Any, Callable
 from ..verification.acceptance import AcceptanceContract, CheckSpec, Criterion
 from ..verification.completion import COMPLETED_VERIFIED, CompletionGate
 from ..verification.evidence import EvidenceService
-from ..verification.runner import run_check_on_snapshot
+from ..verification.baseline import run_baseline
+from ..verification.runner import build_env, run_check_on_snapshot
 from ..workspaces.manager import StrictWorkspace, WorkspaceManager
 from ..workspaces.repo import resolve_repo
 from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
@@ -80,6 +83,8 @@ from .identity import ProcessIdentity, hash_token
 from .paths import ensure_private_dir
 from .policy import AuthorisationPolicy
 from .taskplan import WRITE_KINDS
+
+log = logging.getLogger("duet.pairing")
 
 DEFAULT_WAIT_SECONDS = 25.0
 # MCP clients time tool calls out (Codex defaults to 60 s); a wait returns
@@ -903,12 +908,26 @@ class PairCoordinator:
         return not thread.is_alive()
 
     def _run_checks(self, run_id: str, snapshot_id: str, contract: AcceptanceContract, action_ids: list[str]) -> None:
-        lines = []
+        lines: list[str] = []
+        reused: list[str] = []
         try:
             snap_row = self.evidence.snapshot(snapshot_id)
             manifest = json.loads(self.artifacts.get_bytes(snap_row["manifest_ref"]).decode("utf-8"))
+            self._ensure_baselines(run_id, contract)
+            existing = self.evidence.evidence_for(run_id, snapshot_id, contract.hash())
             for action_id, check_id in zip(action_ids, contract.required_checks()):
                 spec = contract.check(check_id)
+                prior = existing.get(check_id)
+                if prior is not None and prior["status"] == "passed" and prior["env_fingerprint"] == build_env(spec, self.check_env)[1]:
+                    # Same tree, same contract (so the same command), same
+                    # environment: the recorded evidence stands (AT44).
+                    fence = self.runtime.claim_action(CONTROLLER, action_id)["lease"]["fencing_token"]
+                    self.runtime.record_action(CONTROLLER, action_id, ActionState.RUNNING, fence=fence)
+                    self.runtime.record_action(CONTROLLER, action_id, ActionState.SUCCEEDED, fence=fence,
+                                               result={"status": "passed", "reused": prior["evidence_id"]})
+                    reused.append(check_id)
+                    lines.append(f"{check_id}: passed")
+                    continue
                 # The action lease must outlive the check's own timeout.
                 claimed = self.runtime.claim_action(CONTROLLER, action_id, lease_seconds=spec.timeout_seconds + 300)
                 fence = claimed["lease"]["fencing_token"]
@@ -937,7 +956,7 @@ class PairCoordinator:
         try:
             run = self.runtime.get_run(CONTROLLER, run_id)
             if RunLifecycle(run["lifecycle"]) not in TERMINAL_RUN:
-                text = f"Checks on {snapshot_id}: " + "; ".join(lines)
+                text = f"Checks on {snapshot_id}: " + "; ".join(lines) + (f" (evidence reused for {', '.join(reused)}: same tree, contract and environment)" if reused else "")
                 for part in self.runtime.participants(CONTROLLER, run_id):
                     self._status(run_id, part["participant_id"], text, snapshot_id=snapshot_id)
                 if not passed:
@@ -947,6 +966,21 @@ class PairCoordinator:
         except DomainError:
             pass
         self.notify()
+
+    def _ensure_baselines(self, run_id: str, contract: AcceptanceContract) -> None:
+        """Run each required check once on the base commit (per contract
+        version), so the gate can tell new behaviour from a suite that was
+        already green (D10, AT21)."""
+        done = self.evidence.baselines_for(run_id, contract.hash())
+        settings = self.settings(run_id)
+        for check_id in contract.required_checks():
+            if check_id in done:
+                continue
+            outcome = run_baseline(contract.check(check_id), settings.repo_path, settings.base_sha, self.state_root / "checkruns", parent_env=self.check_env)
+            try:
+                self.evidence.record_baseline(CONTROLLER, run_id, contract, settings.base_sha, outcome)
+            except DomainError:
+                log.exception("could not record the baseline of %s", check_id)
 
     def _changes_requested(self, run_id: str, snapshot_id: str, reason: str) -> None:
         latest = self._latest_snapshot(run_id)

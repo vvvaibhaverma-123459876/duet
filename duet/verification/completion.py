@@ -103,6 +103,7 @@ class CompletionGate:
             self._tasks(tx, run_id, assume_verified),
             self._checks(run_id, snapshot_id, acceptance_hash, contract),
             self._reviews(tx, run, snap, contract),
+            self._criteria(tx, run, snap, contract),
             self._findings(run_id),
             self._contributions(tx, run, snap),
             self._scope(tx, run, snap, contract, workspace, snapshot),
@@ -138,53 +139,157 @@ class CompletionGate:
             return PredicateItem("required_checks", False, "; ".join(problems))
         return PredicateItem("required_checks", True, f"{len(required)} required check(s) passed on {snapshot_id}")
 
-    def _reviews(self, tx, run: dict, snap: dict, contract: AcceptanceContract) -> PredicateItem:
-        if not contract.review_required():
-            return PredicateItem("non_author_review", True, "the contract requires no review")
-        reviews = self.evidence.reviews_for(run["run_id"], snap["snapshot_id"], run["acceptance_hash"])
-        authors = self._diff_authors(tx, snap)
-        author_providers = {tx.require("participants", a)["provider"] for a in authors}
-        latest_by_reviewer: dict[str, dict] = {}
-        coauthor_approvals: set[str] = set()
-        for review in reviews:
-            if review["reviewer"] in authors or review["reviewer_provider"] in author_providers:
-                if review["disposition"] == "approve":
-                    coauthor_approvals.add(review["reviewer_provider"])
-                continue
-            if review["disposition"] in ("approve", "changes_requested"):
-                latest_by_reviewer[review["reviewer"]] = review
-        approvals = [r for r in latest_by_reviewer.values() if r["disposition"] == "approve"]
-        blocked = [r for r in latest_by_reviewer.values() if r["disposition"] == "changes_requested"]
-        if blocked:
-            return PredicateItem("non_author_review", False, f"changes requested on this snapshot by {', '.join(r['reviewer_provider'] for r in blocked)}")
-        if not approvals:
-            if coauthor_approvals:
-                return PredicateItem(
-                    "non_author_review", False,
-                    f"no non-author approval for {snap['snapshot_id']}: {', '.join(sorted(coauthor_approvals))} approved it but wrote part of "
-                    "this diff, and an author's approval is not a review",
-                )
-            stale = tx.scalar("SELECT COUNT(*) FROM reviews WHERE run_id = ? AND disposition = 'approve'", (run["run_id"],))
-            hint = f" ({stale} approval(s) exist for other snapshots or contract versions and no longer apply)" if stale else ""
-            return PredicateItem("non_author_review", False, f"no non-author approval for {snap['snapshot_id']}{hint}")
-        return PredicateItem("non_author_review", True, f"approved by {', '.join(r['reviewer_provider'] for r in approvals)}")
+    def _manifest(self, snap: dict) -> dict[str, str]:
+        """path -> content hash of a snapshot's files."""
+        try:
+            data = json.loads(self.artifacts.get_bytes(snap["manifest_ref"]).decode("utf-8"))
+        except Exception:
+            return {}
+        return {f["path"]: f["sha256"] for f in data.get("files", [])}
 
-    @staticmethod
-    def _diff_authors(tx, snap: dict) -> set[str]:
-        """Participants who wrote part of this snapshot's diff: its author,
-        and the author of every capture up to its own that changed one of
-        the paths it changes. The workspace is captured whenever the writer
-        role moves, so each writer's edits carry their name even when the
-        next writer submits them. Conservative: whoever wrote an earlier
-        version of a changed file is not a non-author of the result."""
-        changed = set(json.loads(snap["changed_json"]))
-        authors = {snap["author"]} if snap["author"] else set()
-        for row in tx.query("SELECT snapshot_id, author, changed_json FROM snapshots WHERE run_id = ? ORDER BY created_at, rowid", (snap["run_id"],)):
-            if row["author"] and changed & set(json.loads(row["changed_json"])):
-                authors.add(row["author"])
+    def authorship(self, tx, snap: dict) -> dict[str, dict]:
+        """Who wrote each changed file of `snap`, from content, not roles.
+        The author of a file is whoever first submitted (or handed off) that
+        exact content; contributors are those who submitted other versions of
+        it earlier. Submitting someone else's unchanged work therefore never
+        makes it yours, whatever the writer role says (AT25)."""
+        changed = json.loads(snap["changed_json"])
+        final = self._manifest(snap)
+        history = []
+        for row in tx.query("SELECT * FROM snapshots WHERE run_id = ? ORDER BY created_at, rowid", (snap["run_id"],)):
+            history.append((dict(row), self._manifest(dict(row)) if row["snapshot_id"] != snap["snapshot_id"] else final))
             if row["snapshot_id"] == snap["snapshot_id"]:
                 break
-        return authors
+        out = {}
+        for path in changed:
+            want = final.get(path)
+            author, versions = None, {}
+            for row, files in history:
+                if path not in json.loads(row["changed_json"]) or not row["author"]:
+                    continue
+                if files.get(path) == want:
+                    author = author or row["author"]
+                elif author is None:
+                    versions[row["author"]] = row["snapshot_id"]  # that contributor's latest earlier version
+            author = author or snap["author"]
+            versions.pop(author, None)
+            out[path] = {"author": author, "contributors": set(versions), "versions": versions}
+        return out
+
+    @staticmethod
+    def _covers(review: dict, path: str) -> bool:
+        scope = json.loads(review["scope_json"]) if review.get("scope_json") else ["all"]
+        return "all" in scope or path in scope or f"file:{path}" in scope
+
+    @staticmethod
+    def _bases(review: dict) -> set[str]:
+        scope = json.loads(review["scope_json"]) if review.get("scope_json") else []
+        return {item[6:] for item in scope if isinstance(item, str) and item.startswith("basis:")}
+
+    def _reviews(self, tx, run: dict, snap: dict, contract: AcceptanceContract) -> PredicateItem:
+        """Every changed file needs an approval from someone who did not write
+        it (on this snapshot, or on an earlier one with the same content when
+        this snapshot's delta review names that basis); no changes requested;
+        and when more than one participant wrote the result, each of them
+        acknowledges the final snapshot."""
+        if not contract.review_required():
+            return PredicateItem("non_author_review", True, "the contract requires no review")
+        providers = {row["participant_id"]: row["provider"] for row in tx.query("SELECT participant_id, provider FROM participants WHERE run_id = ?", (run["run_id"],))}
+        latest: dict[str, dict] = {}
+        for review in self.evidence.reviews_for(run["run_id"], snap["snapshot_id"], run["acceptance_hash"]):
+            if review["disposition"] in ("approve", "changes_requested", "acknowledge"):
+                latest[review["reviewer"]] = review
+        blocked = [r for r in latest.values() if r["disposition"] == "changes_requested"]
+        if blocked:
+            return PredicateItem("non_author_review", False, f"changes requested on this snapshot by {', '.join(r['reviewer_provider'] for r in blocked)}")
+        approvals = [r for r in latest.values() if r["disposition"] == "approve"]
+        files = self.authorship(tx, snap)
+        final = self._manifest(snap)
+
+        def independent(reviewer: str, author: str | None) -> bool:
+            return reviewer != author and (author is None or providers.get(reviewer) != providers.get(author))
+
+        earlier: dict[str, list[dict]] = {}
+        for approval in approvals:
+            for basis in self._bases(approval):
+                rows = tx.query("SELECT * FROM reviews WHERE run_id = ? AND snapshot_id = ? AND acceptance_hash = ? AND reviewer = ? AND disposition = 'approve'",
+                                (run["run_id"], basis, run["acceptance_hash"], approval["reviewer"]))
+                basis_row = tx.get("snapshots", basis)
+                if rows and basis_row is not None:
+                    earlier.setdefault(approval["reviewer"], []).append({"review": dict(rows[-1]), "files": self._manifest(dict(basis_row))})
+        uncovered = []
+        for path, who in sorted(files.items()):
+            if any(independent(a["reviewer"], who["author"]) and self._covers(a, path) for a in approvals):
+                continue
+            carried = any(
+                independent(reviewer, who["author"]) and prior["files"].get(path) == final.get(path) and self._covers(prior["review"], path)
+                for reviewer, priors in earlier.items() for prior in priors
+            )
+            if not carried:
+                uncovered.append(f"{path} (written by {providers.get(who['author'], 'unknown')})")
+                continue
+        for path, who in sorted(files.items()):
+            # A co-edited file: each earlier contributor's version needs its
+            # own approval by someone else, on the snapshot where it appeared,
+            # or the final approver would be approving their own lines.
+            for contributor, version in sorted(who["versions"].items()):
+                approved = tx.query(
+                    "SELECT * FROM reviews WHERE run_id = ? AND snapshot_id = ? AND acceptance_hash = ? AND disposition = 'approve'",
+                    (run["run_id"], version, run["acceptance_hash"]),
+                )
+                if not any(independent(r["reviewer"], contributor) and self._covers(dict(r), path) for r in approved):
+                    uncovered.append(f"{path}: {providers.get(contributor, 'unknown')}'s earlier version in {version} (review that snapshot)")
+        if not files and not any(independent(a["reviewer"], snap["author"]) for a in approvals):
+            uncovered.append("the snapshot (no changed files)")
+        if uncovered:
+            stale = tx.scalar("SELECT COUNT(*) FROM reviews WHERE run_id = ? AND disposition = 'approve' AND snapshot_id != ?", (run["run_id"], snap["snapshot_id"]))
+            hint = f"; {stale} approval(s) of other snapshots or contract versions do not apply unless a delta review names them as its basis" if stale else ""
+            return PredicateItem("non_author_review", False, "no non-author approval covers " + ", ".join(uncovered[:5]) + hint)
+        writers = {w["author"] for w in files.values() if w["author"]} | {c for w in files.values() for c in w["contributors"]}
+        if len(writers) > 1:
+            missing = [providers.get(w, w) for w in sorted(writers) if w != snap["author"] and w not in {r["reviewer"] for r in latest.values() if r["disposition"] in ("approve", "acknowledge")}]
+            if missing:
+                return PredicateItem("non_author_review", False, f"jointly written: {', '.join(missing)} must acknowledge the final snapshot {snap['snapshot_id']}")
+        return PredicateItem("non_author_review", True, f"every changed file approved by a non-author ({', '.join(sorted({r['reviewer_provider'] for r in approvals}))})"
+                             + ("; final snapshot acknowledged by all writers" if len(writers) > 1 else ""))
+
+    def _criteria(self, tx, run: dict, snap: dict, contract: AcceptanceContract) -> PredicateItem:
+        """Each required criterion is demonstrated: one of its checks did not
+        pass on the base commit and passes now (fail-to-pass), or a
+        non-author approval of this snapshot names it (scope "criterion:ID").
+        A suite that was already green proves nothing new (AT21)."""
+        evidence = self.evidence.evidence_for(run["run_id"], snap["snapshot_id"], run["acceptance_hash"])
+        baselines = self.evidence.baselines_for(run["run_id"], run["acceptance_hash"])
+        attested: set[str] = set()
+        for review in self.evidence.reviews_for(run["run_id"], snap["snapshot_id"], run["acceptance_hash"]):
+            if review["disposition"] == "approve" and review["reviewer"] != snap["author"]:
+                scope = json.loads(review["scope_json"]) if review["scope_json"] else []
+                attested |= {item[10:] for item in scope if isinstance(item, str) and item.startswith("criterion:")}
+        problems = []
+        for criterion in contract.criteria:
+            if not criterion.required or criterion.id in attested:
+                continue
+            if criterion.kind == "preserve":
+                if criterion.checks and all((evidence.get(c) or {}).get("status") == "passed" for c in criterion.checks):
+                    continue
+                problems.append(f"{criterion.id}: its checks must pass on this snapshot")
+                continue
+            shown = [c for c in criterion.checks if (evidence.get(c) or {}).get("status") == "passed"
+                     and c in baselines and baselines[c]["status"] in ("failed", "error")]
+            if shown:
+                continue
+            pending = [c for c in criterion.checks if c not in baselines]
+            already = [c for c in criterion.checks if (baselines.get(c) or {}).get("status") == "passed"]
+            if pending:
+                problems.append(f"{criterion.id}: baseline of {', '.join(pending)} not recorded yet")
+            elif already:
+                problems.append(f"{criterion.id}: {', '.join(already)} already passed before the change, so it cannot show the criterion; "
+                                f"add a check that fails without it, or a non-author review must attest it (review scope criterion:{criterion.id})")
+            else:
+                problems.append(f"{criterion.id}: no check shows it (fail-to-pass) and no review attests it")
+        if problems:
+            return PredicateItem("criteria_demonstrated", False, "; ".join(problems))
+        return PredicateItem("criteria_demonstrated", True, "every required criterion shown by a fail-to-pass check or an explicit review")
 
     def _findings(self, run_id: str) -> PredicateItem:
         open_blocking = self.evidence.open_blocking_findings(run_id)
@@ -327,7 +432,7 @@ def _classify(items: list[PredicateItem]) -> str:
     if all(status.values()):
         return COMPLETED_VERIFIED
     if status["required_checks"] and status["required_tasks"] and status["scope_and_policy"] and not (
-        status["non_author_review"] and status["blocking_findings"] and status["both_contributions"]
+        status["non_author_review"] and status["blocking_findings"] and status["both_contributions"] and status.get("criteria_demonstrated", True)
     ):
         return IMPLEMENTED_REVIEW_PENDING
     return REPORTED_UNVERIFIED

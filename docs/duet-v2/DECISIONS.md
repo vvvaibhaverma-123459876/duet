@@ -453,3 +453,23 @@ validators. D04 code is unchanged.
   recorded next to what was requested, and differences are flagged (AT17).
 - Routing never selects another provider or participant, so it can never
   replace the second provider's obligation to save cost.
+
+## D-031: Final-revision review and completion (D10)
+
+- Required checks are baselined on the base commit. A `change` criterion
+  counts only with fail-to-pass evidence or an explicit non-author
+  attestation (review scope `criterion:ID`). A `preserve` criterion needs
+  its checks to pass. `kind` is omitted from the contract when it is the
+  default, so earlier contract hashes stay valid.
+- Authorship is per file, from content hashes, never from roles: who first
+  submitted or handed off the exact content wrote it. Review coverage is per
+  file, by a non-author of the other provider. Co-edited files need each
+  earlier version reviewed on its own snapshot. Several writers each
+  acknowledge the final snapshot (a new `acknowledge` disposition). The
+  submitter may review only files it did not write, named explicitly.
+- Delta reviews name their basis (`basis:SNAPSHOT`). Unchanged files carry
+  the basis approval; changed files need the new review.
+- Passed evidence is reused only for the same snapshot, contract version and
+  environment fingerprint.
+- The final report (`duet.final-report/1`) is deterministic: built from
+  records, with every missing obligation and its next action.
