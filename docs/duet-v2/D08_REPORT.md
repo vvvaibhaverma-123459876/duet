@@ -44,8 +44,8 @@ was involved.
 
 An internal review agent audited D06 and D07 at `5814b11` and reproduced
 each finding. This is not the independent Codex review. The usage findings
-are fixed here. The task-graph findings (1–4, 9–11) are being fixed in a
-separate change; see `HANDOFF.md`.
+are fixed here. The task-graph findings (1–4, 9–11) are fixed in `6a9f5bd`
+(merged), listed in `D06_REPORT.md`.
 
 | Finding | Fix | Test |
 |---|---|---|
@@ -63,8 +63,8 @@ separate change; see `HANDOFF.md`.
   rewritten for D08 semantics: `test_local_turn_allowance_is_reserved_and_recorded`
   became `test_local_turn_allowance_protects_the_review`. With the review now
   reserved, an optional turn can no longer spend the last of an allowance.
-- Full suite: 802 passed, 6 skipped (core). The MCP venv and non-root
-  results are in `HANDOFF.md`.
+- Full suite: 802 passed, 6 skipped (core) at the D08 commit. The results
+  after merging the task-graph fixes are in `HANDOFF.md`.
 
 ## Limits
 
