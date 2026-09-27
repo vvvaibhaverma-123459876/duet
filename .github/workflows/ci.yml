@@ -34,7 +34,7 @@ jobs:
     container: python:3.11
     steps:
       - uses: actions/checkout@v4
-      - name: Install (core only: MCP tests skip, proving the core needs no SDK)
+      - name: Install core only (MCP tests skip, which proves the core needs no SDK)
         run: pip install -e ".[test]"
       - name: Suite as root
         run: |
