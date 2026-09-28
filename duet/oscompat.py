@@ -182,6 +182,23 @@ def detached_kwargs() -> dict:
     return {"start_new_session": True, "close_fds": True}
 
 
+def spawn_detached(argv: list[str], **kwargs: Any) -> subprocess.Popen:
+    """Start a background process that outlives its launcher.
+
+    Windows: a launcher inside a job object (the MCP SDK puts each server it
+    starts in one and kills the job on shutdown) would take the child down
+    with it, so ask to break away from the job; if the job forbids that,
+    start inside it (the next launcher then restarts the service)."""
+    if IS_WINDOWS:  # pragma: no cover
+        breakaway = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB
+        base = detached_kwargs()
+        try:
+            return subprocess.Popen(argv, **kwargs, **{**base, "creationflags": base["creationflags"] | breakaway})
+        except OSError:
+            return subprocess.Popen(argv, **kwargs, **base)
+    return subprocess.Popen(argv, **kwargs, **detached_kwargs())
+
+
 # --- file locks ---------------------------------------------------------------------------
 
 
@@ -248,10 +265,18 @@ def join_command(argv: list[str]) -> str:
     return shlex.join(argv)
 
 
-def resolve_argv(argv: list[str]) -> list[str]:
-    """Windows: CreateProcess finds only `name.exe` for a bare name, not the
-    `name.cmd` launcher npm installs, so look the program up with PATHEXT
-    first. POSIX exec already searches PATH."""
+def resolve_argv(argv: list[str]) -> "list[str] | str":
+    """What to hand to Popen for `argv`.
+
+    Windows: a shell command from `shell_argv` becomes the raw command line
+    `cmd /d /s /c "<command>"`; list2cmdline would escape its quotes as \\"
+    (which cmd does not understand), and without /s cmd strips the first and
+    last quote of any line holding more than two. And CreateProcess finds
+    only `name.exe` for a bare name, not the `name.cmd` launcher npm
+    installs, so the program is looked up with PATHEXT first. POSIX exec
+    already searches PATH."""
+    if IS_WINDOWS and len(argv) == 5 and argv[1:4] == ["/d", "/s", "/c"]:  # pragma: no cover
+        return f'"{argv[0]}" /d /s /c "{argv[4]}"'
     if IS_WINDOWS and argv and not os.path.dirname(argv[0]):  # pragma: no cover
         import shutil
 
@@ -333,7 +358,7 @@ def is_batch_launcher(path: str) -> bool:
 
 __all__ = [
     "IS_WINDOWS", "LockBusy", "detached_kwargs", "group_exists", "is_batch_launcher", "join_command", "kill_tree", "lock_file",
-    "claude_hook_argv", "git_bash", "own_group_kwargs", "parent_pid", "pid_exists", "remove_tree", "resolve_argv", "shell_argv", "signal_group", "split_command", "unlock_file", "user_key",
+    "claude_hook_argv", "git_bash", "own_group_kwargs", "parent_pid", "pid_exists", "remove_tree", "resolve_argv", "shell_argv", "spawn_detached", "signal_group", "split_command", "unlock_file", "user_key",
     "windows_parent_pid", "windows_process_start",
 ]
 

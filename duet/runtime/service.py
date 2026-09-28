@@ -269,9 +269,9 @@ def ensure_service(paths: ServicePaths, *, spawn: bool = True, timeout: float = 
         env.update(extra_env or {})
         fd = os.open(paths.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            subprocess.Popen(
+            oscompat.spawn_detached(
                 [sys.executable, "-m", "duet", "service", "run", "--state-root", str(paths.root)],
-                stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, env=env, **oscompat.detached_kwargs(),
+                stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, env=env,
             )
         finally:
             os.close(fd)

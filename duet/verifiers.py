@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from . import oscompat
 from .logging_setup import get_logger
 from .providers.process import run_bounded
 
@@ -71,7 +72,7 @@ class CommandVerifier:
         self.name = f"cmd:{command}"
 
     def verify(self, workspace: Path) -> VerificationResult:
-        shell = ["cmd", "/c", self.command] if os.name == "nt" else ["/bin/sh", "-c", self.command]
+        shell = oscompat.shell_argv(self.command)
         return _run_check(shell, workspace, self.timeout_seconds, repr(self.command))
 
 
