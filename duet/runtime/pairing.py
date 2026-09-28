@@ -24,7 +24,6 @@ import logging
 import json
 import os
 import secrets
-import shlex
 import subprocess
 import threading
 import time
@@ -32,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .. import oscompat
 from ..verification.acceptance import AcceptanceContract, CheckSpec, Criterion
 from ..verification.completion import COMPLETED_VERIFIED, CompletionGate
 from ..verification.evidence import EvidenceService
@@ -1461,7 +1461,7 @@ def contract_from_checks(objective: str, checks: list | None, protected: list[st
     specs = []
     for index, raw in enumerate(checks, start=1):
         if isinstance(raw, str):
-            argv = shlex.split(raw)
+            argv = oscompat.split_command(raw)
         elif isinstance(raw, list) and all(isinstance(a, str) for a in raw):
             argv = list(raw)
         else:

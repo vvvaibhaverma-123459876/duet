@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import contextlib
 import json
 import os
@@ -7,10 +6,7 @@ import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
-try:  # POSIX advisory locking; the registry is best-effort elsewhere.
-    import fcntl
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore[assignment]
+from . import oscompat
 
 MAX_ENTRIES = 200
 
@@ -97,8 +93,7 @@ def _locked():
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(path.with_suffix(".lock"), "a+", encoding="utf-8")
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        oscompat.lock_file(handle)
     except OSError:
         handle = None  # advisory registry: never break a run over it
     try:
@@ -106,8 +101,7 @@ def _locked():
     finally:
         if handle is not None:
             try:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                oscompat.unlock_file(handle)
             finally:
                 handle.close()
 
@@ -142,10 +136,4 @@ def _save(entries: list[RunEntry]) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return oscompat.pid_exists(pid)

@@ -18,6 +18,11 @@ def state_dir(create: bool = True) -> Path:
     override = os.environ.get("DUET_STATE_DIR")
     if override:
         path = Path(override).expanduser()
+    elif os.name == "nt":
+        # %LOCALAPPDATA% is per-user (its ACL admits only the user, SYSTEM
+        # and administrators), local to the machine, and not roamed.
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        path = Path(base) / "duet"
     elif sys.platform == "darwin":
         path = Path.home() / "Library" / "Application Support" / "duet"
     else:

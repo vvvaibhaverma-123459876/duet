@@ -26,6 +26,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import oscompat
+
 TOKEN_BYTES = 32
 
 
@@ -70,6 +72,12 @@ def _darwin_boot(raw: str) -> str:
 def boot_id() -> str:
     """The kernel boot id. It cannot change while this process runs, so it is
     computed once per process (on macOS that costs a `sysctl` subprocess)."""
+    if oscompat.IS_WINDOWS:
+        # Windows derives its boot time from the uptime, which jitters by a
+        # second between processes, so it cannot identify a boot. Process
+        # creation times are exact and never reused across boots, so the
+        # start time alone distinguishes a reused pid.
+        return "windows"
     try:
         return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
     except OSError:
@@ -88,6 +96,8 @@ def process_start(pid: int) -> str | None:
     Spawns `ps` only where /proc is unavailable."""
     if pid <= 0:
         return None
+    if oscompat.IS_WINDOWS:
+        return oscompat.windows_process_start(pid)
     stat_path = Path(f"/proc/{pid}/stat")
     procfs = _has_procfs()
     if procfs and not stat_path.exists():
@@ -155,7 +165,7 @@ class ProcessIdentity:
         exist at all; otherwise it is assumed alive."""
         if self.host != host_name():
             return True
-        if not allow_subprocess and not _has_procfs():
+        if not allow_subprocess and not _has_procfs() and not oscompat.IS_WINDOWS:
             if boot_id.cache_info().currsize and self.boot != boot_id():
                 return False
             return _pid_exists(self.pid)
@@ -166,15 +176,7 @@ class ProcessIdentity:
 
 
 def _pid_exists(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True  # exists but not ours (EPERM), or cannot tell: assume alive
-    return True
+    return oscompat.pid_exists(pid)
 
 
 def owner_is_dead(owner: str | None, *, allow_subprocess: bool = True) -> bool:
