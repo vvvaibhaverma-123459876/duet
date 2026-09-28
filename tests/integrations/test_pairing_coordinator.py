@@ -311,6 +311,30 @@ def wait_for(predicate, timeout=30.0):
 
 
 class TestReviewedPatch:
+    def test_the_deliverable_is_committed_before_the_run_is_completed(self, pair, monkeypatch):
+        """Windows CI: `duet pair` returned as soon as the run was
+        COMPLETED_VERIFIED, and the branch did not yet hold the commit. The
+        commit is made before the run is marked complete."""
+        co, writer, reviewer = pair.co, pair.claude, pair.codex
+        seen = []
+        original = co._commit_deliverable
+
+        def recording(run_id, *args, **kwargs):
+            seen.append(co.runtime.get_run(CONTROLLER, run_id)["lifecycle"])
+            return original(run_id, *args, **kwargs)
+
+        monkeypatch.setattr(co, "_commit_deliverable", recording)
+        co.claim(writer)
+        (co.workspace(pair.run_id).path / "calc.py").write_text(MUL)
+        snapshot_id = co.submit(writer, summary="added mul")["snapshot_id"]
+        request = next(m for m in co.wait(reviewer, timeout=5)["messages"] if m["kind"] == "REVIEW_REQUEST")
+        assert co.wait_for_checks(snapshot_id)
+        co.send(reviewer, kind="REVIEW_RESULT", body="ok", reply_to=request["message_id"], review={"disposition": "approve"})
+        assert wait_for(lambda: pair.lifecycle() == "COMPLETED_VERIFIED")
+        assert seen and seen[0] != "COMPLETED_VERIFIED", seen  # committed while the run was still being verified
+        branch = co.settings(pair.run_id).branch
+        assert "def mul" in git("show", f"{branch}:calc.py", cwd=pair.repo)
+
     def test_writer_submits_peer_reviews_controller_completes(self, pair):
         co, writer, reviewer = pair.co, pair.claude, pair.codex
         user_head = git("rev-parse", "HEAD", cwd=pair.repo)

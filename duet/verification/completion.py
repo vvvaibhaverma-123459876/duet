@@ -14,6 +14,8 @@ controller can move a run there. Everything else gets a precise label and
 the list of missing obligations; no second LLM is needed to write it."""
 from __future__ import annotations
 
+from typing import Callable
+
 import fnmatch
 import json
 from dataclasses import dataclass
@@ -397,9 +399,15 @@ class CompletionGate:
             )
             return dict(wtx.require("checkpoints", checkpoint_id))
 
-    def finalize(self, run_id: str, snapshot_id: str, *, workspace: Path | None = None, snapshot: Snapshot | None = None, principal: Principal = CONTROLLER) -> CompletionReport:
+    def finalize(
+        self, run_id: str, snapshot_id: str, *, workspace: Path | None = None, snapshot: Snapshot | None = None,
+        principal: Principal = CONTROLLER, before_complete: "Callable[[], None] | None" = None,
+    ) -> CompletionReport:
         """Evaluate; if everything but the checkpoint holds, export it,
-        re-evaluate, and only then move the run to COMPLETED_VERIFIED."""
+        re-evaluate, and only then move the run to COMPLETED_VERIFIED.
+        `before_complete` runs once everything holds and just before that
+        move (the deliverable commit), so a completed run is never seen
+        before its deliverable exists."""
         if principal.kind != "controller":
             raise Unauthorized("only the controller finalises runs")
         report = self.evaluate(run_id, snapshot_id, workspace=workspace, snapshot=snapshot)
@@ -423,6 +431,8 @@ class CompletionGate:
             self.runtime.transition_run(principal, run_id, RunLifecycle.VERIFYING, reason="completion predicate evaluation")
         elif lifecycle != RunLifecycle.VERIFYING:
             raise InvalidTransition(f"run is {lifecycle.value}; completion is established from EXECUTING/REVIEWING/REPAIRING/VERIFYING")
+        if before_complete is not None:
+            before_complete()
         self.runtime.transition_run(principal, run_id, RunLifecycle.COMPLETED_VERIFIED, reason=f"predicate satisfied for {snapshot_id}")
         return report
 

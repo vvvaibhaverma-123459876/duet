@@ -1071,11 +1071,15 @@ class PairCoordinator:
             # marking it and then failing (a protected input changed, an
             # approval that does not count) would strand the run.
             verifying = task["state"] == TaskState.REVIEW_REQUIRED.value
+            delivery: list[tuple[bool, str]] = []  # filled by the commit made just before completion
             report = self.gate.evaluate(run_id, snapshot_id, workspace=ws.path, snapshot=snap, assume_verified=(task_id,) if verifying else ())
             if not any(item.name != "checkpoint_exported" for item in report.missing):
                 if verifying:
                     task = self.runtime.transition_task(CONTROLLER, task_id, TaskState.VERIFIED, expected_version=task["state_version"], reason=f"checks passed and review approved on {snapshot_id}")
-                report = self.gate.finalize(run_id, snapshot_id, workspace=ws.path, snapshot=snap)
+                report = self.gate.finalize(
+                    run_id, snapshot_id, workspace=ws.path, snapshot=snap,
+                    before_complete=lambda: delivery.append(self._commit_deliverable(run_id, ws, snap, snapshot_id)),
+                )
             if report.outcome != COMPLETED_VERIFIED or not report.satisfied:
                 # Actions still in flight (e.g. the reviewer's own turn) settle
                 # shortly and trigger another evaluation; no need to announce.
@@ -1095,7 +1099,7 @@ class PairCoordinator:
                 if scope is not None:
                     return {**report.to_dict(), "reopen": f"{snapshot_id} cannot be accepted: {scope.detail}. Fix it and submit again."}
                 return report.to_dict()
-            committed, detail = self._commit_deliverable(run_id, ws, snap, snapshot_id)
+            committed, detail = delivery[0] if delivery else self._commit_deliverable(run_id, ws, snap, snapshot_id)
             self._release_writer(run_id)
             delivered = (
                 f"The verified snapshot is committed on branch {ws.branch} as {detail}." if committed
