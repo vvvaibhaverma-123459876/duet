@@ -27,6 +27,18 @@ from duet.runtime.store import Store  # noqa: E402
 EMULATORS = Path(__file__).resolve().parents[1] / "providers" / "emulators"
 
 
+def run_pair(argv: list[str], *, env: dict, cwd: Path, state: Path, timeout: float = 300) -> subprocess.CompletedProcess:
+    """Run `duet pair`; on a timeout, fail with what DUET said and the tail
+    of its service log, so a hang is diagnosable from the summary alone."""
+    try:
+        return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+    except subprocess.TimeoutExpired as exc:
+        err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        logs = sorted(state.rglob("service.log"))
+        tail = logs[0].read_text(errors="replace")[-4000:] if logs else "(no service log)"
+        pytest.fail(f"duet pair timed out after {timeout}s | stderr: {err[-1500:]!r} | service log tail: {tail!r}")
+
+
 def shim(bin_dir: Path, name: str, script: str) -> Path:
     return make_exe(bin_dir, name, script=EMULATORS / script, python=PY)
 
@@ -55,10 +67,10 @@ def test_duet_pair_with_emulated_managed_sessions(tmp_path):
         defined = subprocess.run([sys.executable, "-m", "duet", "usage", "pool", "set", *pool], env=env, capture_output=True, text=True, timeout=60)
         assert defined.returncode == 0, defined.stderr
     try:
-        proc = subprocess.run(
+        proc = run_pair(
             [sys.executable, "-m", "duet", "pair", "add mul(a, b) to calc.py", "--repo", str(repo),
              "--check", f'"{PY}" check_feature.py', "--writer", "claude", "--json"],
-            env=env, capture_output=True, text=True, timeout=300, cwd=tmp_path,
+            env=env, cwd=tmp_path, state=state,
         )
         assert proc.returncode == 0, proc.stderr[-3000:] + proc.stdout[-3000:]
         status = json.loads(proc.stdout)
@@ -120,9 +132,9 @@ def test_duet_pair_shares_a_plan_and_both_contribute(tmp_path):
     env.pop("DUET_MANAGED_PEER", None)
     paths = ServicePaths.for_root(state / "v2")
     try:
-        proc = subprocess.run(
+        proc = run_pair(
             [sys.executable, "-m", "duet", "pair", "add mul(a, b) to calc.py", "--repo", str(repo), "--check", f'"{PY}" check_feature.py', "--json"],
-            env=env, capture_output=True, text=True, timeout=300, cwd=tmp_path,
+            env=env, cwd=tmp_path, state=state,
         )
         assert proc.returncode == 0, proc.stderr[-3000:] + proc.stdout[-3000:]
         status = json.loads(proc.stdout)
