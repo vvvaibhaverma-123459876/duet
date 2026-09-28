@@ -274,6 +274,11 @@ def _kill_group(pgid: int, sig: int) -> None:
     oscompat.signal_group(pgid, sig)
 
 
+def _strip_cr(line: bytearray) -> bytes:
+    """A line without its Windows line ending's carriage return."""
+    return bytes(line[:-1]) if line.endswith(b"\r") else bytes(line)
+
+
 def _mark_launch(proc: subprocess.Popen) -> None:
     """Remember when the child started, so a Windows tree kill never takes a
     process older than the child (a reused pid) for one of its descendants."""
@@ -407,7 +412,7 @@ def stream_process(
                             pending += piece
                     if newline < 0:
                         break
-                    lines.put((bytes(pending), overflowing))
+                    lines.put((_strip_cr(pending), overflowing))
                     if overflowing:
                         counters["truncated"] += 1
                     pending = bytearray()
@@ -417,7 +422,7 @@ def stream_process(
             pass
         finally:
             if pending:
-                lines.put((bytes(pending), overflowing))
+                lines.put((_strip_cr(pending), overflowing))
                 if overflowing:
                     counters["truncated"] += 1
             lines.put(None)

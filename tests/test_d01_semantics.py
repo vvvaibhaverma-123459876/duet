@@ -510,9 +510,9 @@ class TestDoctor:
         config = parse_config(
             f"""
 [agents.claude]
-command = ["{sys.executable}", "--dangerously-skip-permissions"]
+command = ['{sys.executable}', "--dangerously-skip-permissions"]
 [agents.codex]
-command = ["{sys.executable}"]
+command = ['{sys.executable}']
 """
         )
         checks = run_doctor(config, live=False)
@@ -524,7 +524,7 @@ command = ["{sys.executable}"]
 
         monkeypatch.setattr(doctor, "_is_root", lambda: True)
         monkeypatch.setenv("IS_SANDBOX", "1")
-        config = parse_config(f'[agents.claude]\ncommand = ["{sys.executable}", "--dangerously-skip-permissions"]\n')
+        config = parse_config(f"[agents.claude]\ncommand = ['{sys.executable}', \"--dangerously-skip-permissions\"]\n")
         assert available_agent_names(run_doctor(config, live=False)) == {"claude"}
 
     def test_no_usable_agent_is_a_hard_failure(self):

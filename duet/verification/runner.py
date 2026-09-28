@@ -13,7 +13,6 @@ from ..runtime.hygiene import redact
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from pathlib import Path
 from ..providers.process import run_bounded
 from ..runtime.artifacts import ArtifactStore
 from ..runtime.contracts import content_hash, utc_now
+from .. import oscompat
 from ..runtime.paths import ensure_private_dir
 from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
 from .acceptance import CheckSpec
@@ -155,7 +155,7 @@ def run_check_on_snapshot(
             return _outcome(spec, "unknown", None, "", "", expected_tree_hash, before.tree_hash, "the materialised copy does not reproduce the snapshot (e.g. submodules); check not run", "", "")
         return run_check(spec, root, snapshot_before=before, parent_env=parent_env)
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        oscompat.remove_tree(scratch)
 
 
 def _no_tests(returncode: int | None, output: str) -> bool:

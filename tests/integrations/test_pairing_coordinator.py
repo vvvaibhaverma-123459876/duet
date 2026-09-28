@@ -121,7 +121,8 @@ class TestJoin:
     def test_checks_are_required_and_never_shell(self):
         with pytest.raises(ValidationError, match="at least one check"):
             contract_from_checks("x", [], None)
-        contract = contract_from_checks("x", ["pytest -q 'a b'"], ["tests/*"])
+        quoted = '"a b"' if os.name == "nt" else "'a b'"  # each platform's own command-line quoting
+        contract = contract_from_checks("x", [f"pytest -q {quoted}"], ["tests/*"])
         spec = contract.check("check1")
         assert spec.argv == ("pytest", "-q", "a b") and spec.shell is None
         assert contract.protected_paths == ("tests/*",) and contract.review_required()

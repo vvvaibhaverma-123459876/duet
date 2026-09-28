@@ -439,12 +439,14 @@ class TestD01Cli:
             [sys.executable, "-m", "duet", "--config", str(duet.harness_config), "run", "--repo", str(repo), "t"],
             env={**os.environ, "PATH": f"{duet.harness_bindir}{os.pathsep}{os.environ['PATH']}", "BATTERY_STATE": str(duet.state), "FC_MODE": "hang"},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            # Windows: its own console process group, so it can receive Ctrl+Break alone.
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         deadline = time.monotonic() + 20
         while not (duet.state / "fc-n").exists() and time.monotonic() < deadline:
             time.sleep(0.05)  # wait until the fake agent's turn is in flight
         time.sleep(0.3)
-        proc.send_signal(signal.SIGINT)
+        proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
         out, err = proc.communicate(timeout=30)
         assert proc.returncode == 130, out + err
         assert "Outcome: interrupted" in out

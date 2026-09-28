@@ -9,11 +9,11 @@ counts a criterion as demonstrated only by fail-to-pass evidence, or by a
 non-author review that explicitly attests it."""
 from __future__ import annotations
 
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+from .. import oscompat
 from ..runtime.paths import ensure_private_dir
 from ..workspaces.snapshots import capture_snapshot
 from .acceptance import CheckSpec
@@ -35,4 +35,4 @@ def run_baseline(spec: CheckSpec, repo_path: Path | str, base_sha: str, scratch_
     except Exception as exc:  # a baseline that cannot run demonstrates nothing, and says so
         return _outcome(spec, "unknown", None, "", "", "", "", f"baseline could not run: {exc}", "", "")
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        oscompat.remove_tree(scratch)

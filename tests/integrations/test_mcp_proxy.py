@@ -35,6 +35,10 @@ def proxy(state: Path, *, wrapped: bool = False) -> StdioServerParameters:
     """wrapped: launch through a shell so the proxy's host process (its
     parent) differs from the test process, like a second agent CLI."""
     env = {"DUET_STATE_DIR": str(state), "PYTHONPATH": os.pathsep.join(sys.path)}
+    if wrapped and os.name == "nt":
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
+        return StdioServerParameters(command=comspec, args=["/d", "/c", PY, "-m", "duet", "mcp", "serve"], env=env)
     if wrapped:
         return StdioServerParameters(command="/bin/sh", args=["-c", f'"{PY}" -m duet mcp serve; exit $?'], env=env)
     return StdioServerParameters(command=PY, args=["-m", "duet", "mcp", "serve"], env=env)

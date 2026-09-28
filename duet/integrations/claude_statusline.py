@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Mapping, Sequence
 
+from .. import oscompat
 from ..usage.observations import (
     STATUSLINE_SOURCE,
     Observation,
@@ -285,8 +286,9 @@ def run_status_line(
     stdout, stderr, returncode = b"", b"", 0
     if original_command:
         try:
+            argv = oscompat.claude_hook_argv(original_command) if isinstance(original_command, str) else list(original_command)
             proc = subprocess.run(
-                original_command, input=raw, capture_output=True, shell=isinstance(original_command, str),
+                argv if argv is not None else original_command, input=raw, capture_output=True, shell=argv is None,
                 env=dict(env) if env is not None else None, cwd=cwd, timeout=timeout_s,
             )
             stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode

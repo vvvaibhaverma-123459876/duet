@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
+from .. import oscompat
 from ..runtime.contracts import ValidationError, check_int, check_text, content_hash
 
 SCHEMA = "duet.acceptance/1"
@@ -61,7 +62,7 @@ class CheckSpec:
 
     @property
     def command(self) -> list[str]:
-        return list(self.argv) if self.argv else ["/bin/sh", "-c", self.shell or ""]
+        return list(self.argv) if self.argv else oscompat.shell_argv(self.shell or "")
 
     def to_dict(self) -> dict:
         data = {

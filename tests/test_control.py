@@ -4,6 +4,8 @@ import os
 import signal
 from pathlib import Path
 
+import pytest
+
 from duet.control import StopTarget, running_targets, stop_target
 
 PS = """\
@@ -45,6 +47,7 @@ class TestRunningTargets:
 
 
 class TestStopTarget:
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals; Windows terminates the tree (test below)")
     def test_sends_sigint_by_default(self, monkeypatch):
         sent = {}
         monkeypatch.setattr(os, "kill", lambda pid, sig: sent.update(pid=pid, sig=sig))
@@ -52,12 +55,25 @@ class TestStopTarget:
         assert sent == {"pid": 4242, "sig": signal.SIGINT}
         assert "SIGINT" in message
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signals; Windows terminates the tree (test below)")
     def test_force_sends_sigterm(self, monkeypatch):
         sent = {}
         monkeypatch.setattr(os, "kill", lambda pid, sig: sent.update(pid=pid, sig=sig))
         stop_target(StopTarget("codex", 4242, "tty=x"), force=True)
         assert sent["sig"] == signal.SIGTERM
 
+    @pytest.mark.skipif(os.name != "nt", reason="Windows stop path")
+    def test_windows_terminates_the_tree_and_never_signals(self, monkeypatch):
+        from duet import oscompat
+
+        killed = []
+        monkeypatch.setattr(os, "kill", lambda *a: pytest.fail("os.kill must not be used on Windows"))
+        monkeypatch.setattr(oscompat, "pid_exists", lambda pid: True)
+        monkeypatch.setattr(oscompat, "kill_tree", lambda pid, **kw: killed.append(pid))
+        assert "terminated" in stop_target(StopTarget("codex", 4242, "tty=x"))
+        assert killed == [4242]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX signal path; Windows checks pid_exists first")
     def test_gone_process_reported(self, monkeypatch):
         def raise_lookup(pid, sig):
             raise ProcessLookupError

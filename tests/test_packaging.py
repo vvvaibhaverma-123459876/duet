@@ -63,6 +63,8 @@ def test_installed_wheel_runs_without_source_tree(tmp_path):
     venv.create(env_dir, with_pip=True)
     python = env_dir / ("Scripts" if os.name == "nt" else "bin") / "python"
     subprocess.run([str(python), "-m", "pip", "install", "-q", "--no-deps", str(wheel)], check=True, timeout=300)
+    if os.name == "nt":  # the wheel's one Windows-only dependency
+        subprocess.run([str(python), "-m", "pip", "install", "-q", "psutil"], check=True, timeout=300)
     work = tmp_path / "elsewhere"
     work.mkdir()
     env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "xdg"), "XDG_STATE_HOME": str(tmp_path / "state")}

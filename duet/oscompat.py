@@ -23,9 +23,20 @@ IS_WINDOWS = os.name == "nt"
 if IS_WINDOWS:  # pragma: no cover - exercised by the Windows CI job
     import msvcrt
 
-    import psutil
+    try:
+        import psutil
+    except ImportError:  # a declared dependency; fail where it is needed, not on import
+        psutil = None  # type: ignore[assignment]
 else:
     import fcntl
+
+    psutil = None  # Windows only
+
+
+def _psutil():  # pragma: no cover - Windows only
+    if psutil is None:
+        raise RuntimeError("DUET on Windows needs psutil (a declared dependency): pip install psutil")
+    return psutil
 
 
 # --- processes ----------------------------------------------------------------------------
@@ -37,7 +48,7 @@ def pid_exists(pid: int) -> bool:
     if pid <= 0:
         return False
     if IS_WINDOWS:  # pragma: no cover
-        return psutil.pid_exists(pid)
+        return _psutil().pid_exists(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -51,15 +62,15 @@ def windows_process_start(pid: int) -> str | None:  # pragma: no cover - Windows
     """Creation time of `pid` (exact FILETIME, so stable across calls), or
     None when there is no such process."""
     try:
-        return f"{psutil.Process(pid).create_time():.6f}"
-    except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError, OSError):
+        return f"{_psutil().Process(pid).create_time():.6f}"
+    except (_psutil().NoSuchProcess, _psutil().AccessDenied, ProcessLookupError, OSError):
         return None
 
 
 def windows_parent_pid(pid: int) -> int | None:  # pragma: no cover - Windows only
     try:
-        return psutil.Process(pid).ppid()
-    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+        return _psutil().Process(pid).ppid()
+    except (_psutil().NoSuchProcess, _psutil().AccessDenied, OSError):
         return None
 
 
@@ -87,7 +98,7 @@ def _windows_descendants(pid: int, since: float | None) -> list[Any]:  # pragma:
     `since` (the leader's creation) count, so a reused pid is not taken for
     a child."""
     by_parent: dict[int, list[Any]] = {}
-    for proc in psutil.process_iter(["pid", "ppid", "create_time"]):
+    for proc in _psutil().process_iter(["pid", "ppid", "create_time"]):
         info = proc.info
         if since is not None and (info.get("create_time") or 0) + 0.001 < since:
             continue
@@ -108,9 +119,9 @@ def _windows_descendants(pid: int, since: float | None) -> list[Any]:  # pragma:
 def kill_tree(pid: int, *, since: float | None = None, timeout: float = 5.0) -> None:  # pragma: no cover - Windows only
     """Windows: kill `pid` and all its descendants, children first."""
     try:
-        leader = psutil.Process(pid)
+        leader = _psutil().Process(pid)
         since = since if since is not None else leader.create_time()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+    except (_psutil().NoSuchProcess, _psutil().AccessDenied):
         leader = None
     victims = list(reversed(_windows_descendants(pid, since)))
     if leader is not None:
@@ -118,9 +129,9 @@ def kill_tree(pid: int, *, since: float | None = None, timeout: float = 5.0) -> 
     for proc in victims:
         try:
             proc.kill()
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (_psutil().NoSuchProcess, _psutil().AccessDenied):
             pass
-    psutil.wait_procs(victims, timeout=timeout)
+    _psutil().wait_procs(victims, timeout=timeout)
 
 
 def signal_group(pgid: int, sig: int) -> None:
@@ -250,6 +261,49 @@ def resolve_argv(argv: list[str]) -> list[str]:
     return list(argv)
 
 
+def shell_argv(command: str) -> list[str]:
+    """Run `command` through this platform's shell: /bin/sh, or cmd.exe
+    (%ComSpec%) on Windows."""
+    if IS_WINDOWS:  # pragma: no cover
+        return [os.environ.get("COMSPEC") or "cmd.exe", "/d", "/s", "/c", command]
+    return ["/bin/sh", "-c", command]
+
+
+def claude_hook_argv(command: str) -> list[str] | None:
+    """How Claude Code runs a hook or status-line command string: /bin/sh
+    on POSIX; on Windows through Git Bash (CLAUDE_CODE_GIT_BASH_PATH, or
+    bash on PATH), which Claude Code requires there. None means: use the
+    platform shell (no bash found)."""
+    if not IS_WINDOWS:
+        return ["/bin/sh", "-c", command]
+    import shutil  # pragma: no cover
+
+    bash = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or shutil.which("bash")  # pragma: no cover
+    return [bash, "-c", command] if bash else None  # pragma: no cover
+
+
+def remove_tree(path: "os.PathLike[str] | str") -> None:
+    """Delete a directory tree, including read-only files (snapshot copies
+    are materialised read-only, and Windows refuses to delete those).
+    Best effort: a vanished tree is fine."""
+    import shutil
+    import stat as stat_mod
+
+    def retry_writable(func, target, _exc):  # type: ignore[no-untyped-def]
+        try:
+            os.chmod(target, stat_mod.S_IWRITE | stat_mod.S_IREAD | stat_mod.S_IEXEC)
+            func(target)
+        except OSError:
+            pass
+
+    try:
+        shutil.rmtree(path, onexc=retry_writable)  # Python 3.12+
+    except TypeError:  # pragma: no cover - Python 3.11
+        shutil.rmtree(path, onerror=retry_writable)
+    except FileNotFoundError:
+        pass
+
+
 def is_batch_launcher(path: str) -> bool:
     """A Windows .cmd/.bat file runs through cmd.exe, which re-parses its
     arguments (%VAR% expansion, & | < > ^). DUET must not pass free text to
@@ -259,7 +313,7 @@ def is_batch_launcher(path: str) -> bool:
 
 __all__ = [
     "IS_WINDOWS", "LockBusy", "detached_kwargs", "group_exists", "is_batch_launcher", "join_command", "kill_tree", "lock_file",
-    "own_group_kwargs", "parent_pid", "pid_exists", "resolve_argv", "signal_group", "split_command", "unlock_file", "user_key",
+    "claude_hook_argv", "own_group_kwargs", "parent_pid", "pid_exists", "remove_tree", "resolve_argv", "shell_argv", "signal_group", "split_command", "unlock_file", "user_key",
     "windows_parent_pid", "windows_process_start",
 ]
 

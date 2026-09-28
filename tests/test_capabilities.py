@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import subprocess
 from pathlib import Path
 
@@ -26,8 +27,8 @@ def make_repo(tmp_path: Path) -> Path:
 
 class TestVerifiers:
     def test_command_verifier_pass_and_fail(self, tmp_path):
-        assert CommandVerifier("true").verify(tmp_path).status == "passed"
-        result = CommandVerifier("echo nope >&2; exit 3").verify(tmp_path)
+        assert CommandVerifier(f'"{sys.executable}" -c "pass"').verify(tmp_path).status == "passed"
+        result = CommandVerifier(f'"{sys.executable}" -c "import sys; sys.stderr.write(\'nope\'); sys.exit(3)"').verify(tmp_path)
         assert result.status == "failed" and "nope" in result.output
 
     def test_command_verifier_timeout_fails(self, tmp_path):

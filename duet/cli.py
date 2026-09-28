@@ -861,7 +861,9 @@ def _install_signal_handlers() -> None:
     def _raise_interrupt(signum, frame):
         raise KeyboardInterrupt()
 
-    for sig in (signal.SIGTERM,):
+    # Windows: Ctrl+Break (and CTRL_BREAK_EVENT from a supervisor) is the
+    # console's stop request for a process group; Ctrl+C already raises.
+    for sig in (signal.SIGTERM, *( (signal.SIGBREAK,) if hasattr(signal, "SIGBREAK") else ())):
         try:
             signal.signal(sig, _raise_interrupt)
         except (ValueError, OSError):

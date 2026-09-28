@@ -78,7 +78,10 @@ class TestClaudeTurns:
         assert result.ok and result.text.startswith("done: implement mul()")
         assert result.lineage == "new" and result.session_id
         assert result.settings.requested["effort"] == "high"
-        assert result.settings.accepted == {"model": "claude-opus-5-5", "effort": "high", "permission_mode": "acceptEdits", "permission_prompts": "none"}
+        expected = {"model": "claude-opus-5-5", "effort": "high", "permission_mode": "acceptEdits", "permission_prompts": "none"}
+        if os.name == "nt":  # the fake CLI is a .cmd launcher: arguments are made batch-safe
+            expected["batch_launcher"] = True
+        assert result.settings.accepted == expected
         assert result.settings.observed["model"] == "claude-opus-5-5"
         assert "effort" not in result.settings.observed  # not reported by the CLI: unobserved, not assumed
         cost = [u for u in result.usage if u.metric == "cost_usd" and u.key == ""]
@@ -115,7 +118,10 @@ class TestClaudeTurns:
     def test_mcp_config_is_strict(self, claude, tmp_path):
         claude.run_turn(req(tmp_path, mcp_config={"mcpServers": {"duet": {"command": "duet", "args": ["mcp", "serve"]}}}))
         argv = claude_argv(tmp_path)[-1]
-        assert "--strict-mcp-config" in argv and json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]["duet"]
+        value = argv[argv.index("--mcp-config") + 1]
+        if os.name == "nt":  # a .cmd launcher gets the config as a file, never inline JSON through cmd.exe
+            value = Path(value).read_text(encoding="utf-8")
+        assert "--strict-mcp-config" in argv and json.loads(value)["mcpServers"]["duet"]
 
     @pytest.mark.parametrize(
         "mode,cls,kind",
