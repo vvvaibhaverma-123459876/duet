@@ -84,7 +84,10 @@ if MODE == "peer":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import agent_brain
 
-    config = json.loads(opt("--mcp-config") or "{}")
+    # Like Claude Code, --mcp-config takes inline JSON or a path to a JSON file
+    # (DUET passes a file when the CLI is a Windows .cmd launcher).
+    raw = opt("--mcp-config") or "{}"
+    config = json.loads(raw if raw.lstrip().startswith("{") else Path(raw).read_text(encoding="utf-8"))
     text = agent_brain.act(prompt, (config.get("mcpServers") or {}).get("duet"))
     emit({"type": "assistant", "parent_tool_use_id": None, "message": {"id": "msg_1", "content": [{"type": "text", "text": text}], "usage": {"input_tokens": 10, "output_tokens": 1}}})
     # Like real Claude Code >= 2.1.277, a resumed session reports its

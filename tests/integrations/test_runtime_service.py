@@ -18,7 +18,7 @@ import pytest
 from duet.oscompat import IS_WINDOWS
 from pairkit import MUL, PY, dead_host, live_host, make_repo
 
-from duet.adapters import AuthError
+from duet.adapters import AgentError, AuthError
 from duet.providers.base import SettingsRecord, TurnResult, UsageObservation
 from duet.runtime.contracts import CONTROLLER, PolicyDenied, Unauthorized, ValidationError
 from duet.runtime.peers import FALLBACK_PREFIX, ManagedPeer
@@ -444,6 +444,42 @@ class TestManagedPeer:
             assert wait_until(lambda: not peer.alive, 10) and len(adapter.requests) == 1  # no retry, no other account
             notes = [m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"]
             assert any("does not switch accounts" in n for n in notes)
+        finally:
+            service.close()
+
+    def test_repeated_turn_failures_stop_the_peer_instead_of_hanging(self, paths, tmp_path):
+        """Windows CI: the writer's first turn failed (a launcher problem) and
+        the pair waited forever, since no message would ever come. A failing
+        turn is retried once, then the peer stops and says why."""
+
+        class Crashing(ScriptedProvider):
+            def run_turn(self, request, *, on_event=None, cancel=None):
+                self.requests.append(request)
+                return TurnResult(
+                    status="failed", text="", session_id=None, lineage="new",
+                    settings=SettingsRecord(requested={}, accepted={}, observed={}),
+                    error=AgentError("claude: exited with status 1 before any output", kind="crash"),
+                )
+
+        peers = {}
+
+        def factory(service, run_id, provider):
+            adapter = Crashing(service.paths, None)
+            peer = ManagedPeer(service.coordinator, run_id=run_id, provider=provider, adapter=adapter, state_root=service.paths.root)
+            peers[provider] = (peer, adapter)
+            return peer.start()
+
+        service = start(paths, peer_factory=factory)
+        try:
+            repo = make_repo(tmp_path / "repo")
+            client = ServiceClient(paths)
+            joined = client.call("join", provider="codex", objective="x", repo=str(repo), checks=[CHECK], peer="managed", writer="peer")
+            me = client.with_token(joined["token"])
+            assert wait_until(lambda: me.call("status")["collaboration"] == "PEER_UNAVAILABLE", 30)
+            peer, adapter = peers["claude"]
+            assert wait_until(lambda: not peer.alive, 10) and len(adapter.requests) == 2  # one retry, then stop
+            notes = [m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"]
+            assert any("2 turns in a row failed" in n and "exited with status 1" in n for n in notes)
         finally:
             service.close()
 

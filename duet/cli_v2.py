@@ -313,6 +313,14 @@ def _pair(args) -> int:
                 last = summary
             if RunLifecycle(status["lifecycle"]) in TERMINAL_RUN:
                 break
+            stopped = [p for p in status["participants"] if p["origin"] == "managed" and p["liveness"] in ("unavailable", "gone")]
+            if stopped:
+                # Both sessions are DUET's: nobody can bring a stopped one back, so
+                # waiting would never end. Report why and leave the run to inspect.
+                who = ", ".join(p["provider"] for p in stopped)
+                print(f"A DUET-managed session stopped ({who}); the pair cannot finish. See `duet status --run {run_id}`.", file=sys.stderr)
+                print(json.dumps(status, indent=2) if args.json else format_status(status))
+                return 2
             time.sleep(2.0)
     except KeyboardInterrupt:
         client.call("cancel", run_id=run_id, reason="interrupted from the terminal")
