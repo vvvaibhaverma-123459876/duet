@@ -37,3 +37,15 @@ def make_exe(bin_dir: Path, name: str, *, source: str | None = None, script: Pat
     path.write_text(f'#!/bin/sh\nexec "{py}" "{script}" "$@"\n', encoding="utf-8")
     path.chmod(0o755)
     return path
+
+
+def fake_agent(bin_dir: Path, name: str = "fake", *, stdout: str = "", stderr: str = "", code: int = 0) -> Path:
+    """An agent that reads its whole prompt, prints fixed output and exits
+    with `code` (the portable form of `cat >/dev/null; echo ...; exit N`)."""
+    source = (
+        "import sys\nsys.stdin.read()\n"
+        f"sys.stdout.buffer.write({(stdout + chr(10) if stdout else '').encode()!r})\n"
+        f"sys.stderr.buffer.write({(stderr + chr(10) if stderr else '').encode()!r})\n"
+        f"sys.exit({code})\n"
+    )
+    return make_exe(bin_dir, name, source=source)

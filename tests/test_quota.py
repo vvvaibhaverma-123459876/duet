@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import pytest
+from exeshim import fake_agent
 
 from duet.adapters import AgentResult, QuotaError
 from duet.broker import run_session
@@ -121,9 +122,7 @@ class TestQuotaConfig:
 
 class TestQuotaErrorDetection:
     def test_cli_quota_failure_raises_quota_error(self, tmp_path):
-        script = tmp_path / "fake"
-        script.write_text("#!/bin/sh\ncat > /dev/null\necho 'usage limit reached' >&2\nexit 1\n")
-        script.chmod(0o755)
+        script = fake_agent(tmp_path, stderr="usage limit reached", code=1)
         from duet.adapters import CLIAgent
 
         agent = CLIAgent(

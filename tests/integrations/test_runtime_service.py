@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import stat
 import subprocess
 import sys
@@ -15,6 +14,8 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from duet.oscompat import IS_WINDOWS
 from pairkit import MUL, PY, dead_host, live_host, make_repo
 
 from duet.adapters import AuthError
@@ -52,9 +53,10 @@ class TestEndpoint:
     def test_socket_is_private_and_single_instance(self, paths):
         service = start(paths)
         try:
-            assert stat.S_IMODE(os.stat(paths.socket).st_mode) == 0o600
-            assert stat.S_IMODE(os.stat(paths.root).st_mode) == 0o700
-            assert stat.S_IMODE(os.stat(paths.secret).st_mode) == 0o600
+            if not IS_WINDOWS:  # Windows: the profile directory's ACL, see the access-key test
+                assert stat.S_IMODE(os.stat(paths.socket).st_mode) == 0o600
+                assert stat.S_IMODE(os.stat(paths.root).st_mode) == 0o700
+                assert stat.S_IMODE(os.stat(paths.secret).st_mode) == 0o600
             assert ServiceClient(paths).ping()["pid"] == os.getpid()
             with pytest.raises(ServiceRunning):
                 RuntimeService(paths)
@@ -62,6 +64,27 @@ class TestEndpoint:
             service.close()
         assert not paths.socket.exists() and not paths.secret.exists()
 
+    @pytest.mark.skipif(not IS_WINDOWS, reason="Windows uses a loopback endpoint and an access key")
+    def test_windows_requests_need_the_access_key(self, paths):
+        """Loopback TCP is reachable by other local users: without the per-start
+        key from the private state directory, nothing is served, not even ping."""
+        from duet.runtime.service import _connect
+
+        service = start(paths)
+        try:
+            endpoint = json.loads(paths.socket.read_text())
+            assert endpoint["host"] == "127.0.0.1" and paths.access.exists()
+            for auth in ({}, {"access": "wrong"}):
+                with _connect(paths, 5) as sock:
+                    sock.sendall((json.dumps({"op": "ping", "args": {}, "auth": auth}) + "\n").encode())
+                    reply = json.loads(sock.makefile().readline())
+                assert reply["ok"] is False and reply["error"]["code"] == "unauthorized"
+            assert ServiceClient(paths).ping()["pid"] == os.getpid()  # the client sends the key
+        finally:
+            service.close()
+        assert not paths.access.exists() and not paths.socket.exists()
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="Unix socket path length (sun_path); Windows uses a loopback endpoint")
     def test_long_state_paths_get_a_short_socket(self, tmp_path):
         deep = tmp_path.joinpath(*["nested-directory-name"] * 6) / "state"
         long_paths = ServicePaths.for_root(deep)
@@ -72,6 +95,7 @@ class TestEndpoint:
         finally:
             service.close()
 
+    @pytest.mark.skipif(IS_WINDOWS, reason="Unix socket placement; Windows uses a loopback endpoint")
     def test_the_short_socket_does_not_depend_on_tmpdir(self, tmp_path, monkeypatch):
         """macOS CI: proxies started by an MCP client have no TMPDIR, so a
         socket placed under tempfile.gettempdir() was looked for in two places."""
@@ -107,15 +131,15 @@ class TestEndpoint:
             service.close()
 
     def test_malformed_and_oversized_requests(self, paths):
+        from duet.runtime.service import _connect
+
         service = start(paths)
         try:
-            with socket.socket(socket.AF_UNIX) as sock:
-                sock.connect(str(paths.socket))
+            with _connect(paths, 5) as sock:
                 sock.sendall(b"not json\n")
                 reply = json.loads(sock.makefile().readline())
             assert reply["ok"] is False and reply["error"]["code"] == "validation"
-            with socket.socket(socket.AF_UNIX) as sock:
-                sock.connect(str(paths.socket))
+            with _connect(paths, 5) as sock:
                 try:
                     sock.sendall(b"x" * (2 * 1024 * 1024))
                 except OSError:

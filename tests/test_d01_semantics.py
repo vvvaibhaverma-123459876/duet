@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
 from duet.adapters import (
     AgentError,
@@ -440,21 +441,21 @@ class TestControlTokens:
 
 
 def _script(tmp_path: Path, body: str) -> str:
-    path = tmp_path / "agent.sh"
-    path.write_text("#!/bin/sh\ncat > /dev/null\n" + body)
-    path.chmod(0o755)
-    return str(path)
+    """A fake agent that reads its prompt, then runs the Python `body`
+    (`out`/`err` write UTF-8 bytes whatever the console encoding)."""
+    prelude = "import sys\nsys.stdin.read()\nout = lambda t: sys.stdout.buffer.write(t.encode())\nerr = lambda t: sys.stderr.buffer.write(t.encode())\n"
+    return str(make_exe(tmp_path, "agent", source=prelude + body))
 
 
 class TestAdapter:
     def test_json_output_over_the_cap_is_a_structured_failure(self, tmp_path):
-        cmd = _script(tmp_path, "python3 -c \"print('{\\\"result\\\": \\\"' + 'x' * 200000 + '\\\"}')\"\n")
+        cmd = _script(tmp_path, "out('{\"result\": \"' + 'x' * 200000 + '\"}\\n')\n")
         agent = CLIAgent("a", "A", [cmd], "stdin", "", "json", 30, result_json_path="result", max_output_bytes=4096)
         with pytest.raises(OutputLimitError):
             agent.send("hi", tmp_path)
 
     def test_invalid_cost_is_unknown_with_warning(self, tmp_path):
-        cmd = _script(tmp_path, "echo '{\"result\": \"ok\", \"total_cost_usd\": -3}'\n")
+        cmd = _script(tmp_path, "out('{\"result\": \"ok\", \"total_cost_usd\": -3}\\n')\n")
         agent = CLIAgent("a", "A", [cmd], "stdin", "", "json", 30, result_json_path="result", cost_json_path="total_cost_usd")
         result = agent.send("hi", tmp_path)
         assert result.cost_usd is None
@@ -462,14 +463,14 @@ class TestAdapter:
 
     def test_text_last_line_never_returns_the_echoed_prompt(self, tmp_path):
         stdout = "user\nControl protocol: emit [[DONE]] when complete\n\nthinking...\n\nfinal answer line one\nfinal answer [[HANDOFF]]"
-        cmd = _script(tmp_path, f"cat <<'EOF'\n{stdout}\nEOF\n")
+        cmd = _script(tmp_path, f"out({stdout + chr(10)!r})\n")
         agent = CLIAgent("codex", "Codex", [cmd], "stdin", "", "text-last-line", 30)
         result = agent.send("hi", tmp_path)
         assert "Control protocol" not in result.text
         assert result.text.startswith("final answer line one")
 
     def test_nonzero_exit_is_classified(self, tmp_path):
-        cmd = _script(tmp_path, "echo 'Not logged in · Please run /login' >&2\nexit 1\n")
+        cmd = _script(tmp_path, "err('Not logged in · Please run /login\\n')\nsys.exit(1)\n")
         agent = CLIAgent("a", "A", [cmd], "stdin", "", "text", 30)
         with pytest.raises(AuthError):
             agent.send("hi", tmp_path)
@@ -485,7 +486,7 @@ class TestAdapter:
 
 class TestDoctor:
     def test_probe_session_never_leaks_into_the_session_agent(self, tmp_path):
-        cmd = _script(tmp_path, "echo '{\"result\": \"CLAUDE_DOCTOR_OK\", \"session_id\": \"probe-1\"}'\n")
+        cmd = _script(tmp_path, "out('{\"result\": \"CLAUDE_DOCTOR_OK\", \"session_id\": \"probe-1\"}\\n')\n")
         agent = CLIAgent("claude", "Claude", [cmd], "stdin", "", "json", 30, result_json_path="result", session_json_path="session_id")
         config = parse_config("")
         config.agents = {"claude": agent}
@@ -608,21 +609,27 @@ def test_exit_codes_are_stable():
     assert [exit_code_for(o) for o in ("success", "halted", "unverified", "review_pending", "interrupted")] == [0, 2, 3, 4, 130]
 
 
+COST_SRC = '''
+import json, os, sys
+state = {state!r}
+{version_block}sys.stdin.read()
+try:
+    n = int(open(state).read().strip() or 0)
+except OSError:
+    n = 0
+n += 1
+open(state, "w").write(str(n))
+costs = {costs!r}
+print(json.dumps({{"result": "ok", "session_id": "s1", "total_cost_usd": costs[n - 1]}}))
+'''
+
+
 class TestResumedSessionCost:
     """Claude Code reports a resumed session's cumulative spend; summing it
     per turn double counts (found in the cost-tracking docs during D04)."""
 
     def _agent(self, tmp_path, costs):
-        state = tmp_path / "n"
-        script = tmp_path / "cumulative.sh"
-        costs_list = " ".join(str(c) for c in costs)
-        script.write_text(
-            "#!/bin/bash\ncat > /dev/null\n"
-            f"n=$(cat {state} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {state}\n"
-            f"costs=({costs_list}); c=${{costs[$((n-1))]}}\n"
-            'echo "{\\"result\\":\\"ok\\",\\"session_id\\":\\"s1\\",\\"total_cost_usd\\":$c}"\n'
-        )
-        script.chmod(0o755)
+        script = make_exe(tmp_path, "cumulative", source=COST_SRC.format(state=str(tmp_path / "n"), version_block="", costs=list(costs)))
         return CLIAgent(
             "claude", "Claude", [str(script)], "stdin", "", "json", 30, result_json_path="result",
             session_json_path="session_id", cost_json_path="total_cost_usd", resume_command=[str(script), "{session_id}"],
@@ -673,18 +680,14 @@ class TestAutoCostScope:
         detect_cost_scope.cache_clear()
 
     def _agent(self, tmp_path, costs, version_cmd, name="claude"):
-        state = tmp_path / f"{name}.n"
-        script = tmp_path / f"{name}.sh"
-        costs_list = " ".join(str(c) for c in costs)
-        script.write_text(
-            "#!/bin/bash\n"
-            f'if [ "$1" = "--version" ]; then echo x >> {tmp_path / "version-calls"}; {version_cmd}; fi\n'
-            "cat > /dev/null\n"
-            f"n=$(cat {state} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {state}\n"
-            f"costs=({costs_list}); c=${{costs[$((n-1))]}}\n"
-            'echo "{\\"result\\":\\"ok\\",\\"session_id\\":\\"s1\\",\\"total_cost_usd\\":$c}"\n'
+        version_out, version_code = version_cmd
+        version_block = (
+            'if sys.argv[1:2] == ["--version"]:\n'
+            f'    open({str(tmp_path / "version-calls")!r}, "a").write("x\\n")\n'
+            + (f"    print({version_out!r})\n" if version_out is not None else "")
+            + f"    sys.exit({version_code})\n"
         )
-        script.chmod(0o755)
+        script = make_exe(tmp_path, name, source=COST_SRC.format(state=str(tmp_path / f"{name}.n"), version_block=version_block, costs=list(costs)))
         return CLIAgent(
             name, name.title(), [str(script)], "stdin", "", "json", 30, result_json_path="result",
             session_json_path="session_id", cost_json_path="total_cost_usd", resume_command=[str(script), "{session_id}"],
@@ -696,34 +699,34 @@ class TestAutoCostScope:
         return len(path.read_text().splitlines()) if path.exists() else 0
 
     def test_new_claude_reports_session_cumulative_cost(self, tmp_path):
-        agent = self._agent(tmp_path, [0.25, 0.60, 1.00], 'echo "2.1.283 (Claude Code)"; exit 0')
+        agent = self._agent(tmp_path, [0.25, 0.60, 1.00], ("2.1.283 (Claude Code)", 0))
         costs = [agent.send("x", tmp_path).cost_usd for _ in range(3)]
         assert costs == [pytest.approx(0.25), pytest.approx(0.35), pytest.approx(0.40)]
         assert self.version_calls(tmp_path) == 1  # once per process, not per turn
 
     def test_old_claude_reports_per_call_cost(self, tmp_path):
         # Before 2.1.277 each call reports its own cost; deltas would be wrong.
-        agent = self._agent(tmp_path, [0.25, 0.30, 0.20], 'echo "2.1.276 (Claude Code)"; exit 0')
+        agent = self._agent(tmp_path, [0.25, 0.30, 0.20], ("2.1.276 (Claude Code)", 0))
         results = [agent.send("x", tmp_path) for _ in range(3)]
         assert [r.cost_usd for r in results] == [pytest.approx(0.25), pytest.approx(0.30), pytest.approx(0.20)]
         assert not any("Duet warning" in r.text for r in results)
 
     def test_unknown_version_makes_resumed_cost_unknown(self, tmp_path):
-        agent = self._agent(tmp_path, [0.25, 0.60, 1.00], "echo 'no version here'; exit 0")
+        agent = self._agent(tmp_path, [0.25, 0.60, 1.00], ("no version here", 0))
         first, second, third = (agent.send("x", tmp_path) for _ in range(3))
         assert first.cost_usd == pytest.approx(0.25)  # a new session: the call's own cost either way
         assert second.cost_usd is None and third.cost_usd is None
         assert "could not read" in second.text and "unknown" in second.text
 
     def test_failing_version_command_is_unknown_not_zero(self, tmp_path):
-        agent = self._agent(tmp_path, [0.25, 0.60], "exit 1")
+        agent = self._agent(tmp_path, [0.25, 0.60], (None, 1))
         agent.session_id = "s1"  # attached session: every turn is a resume
         assert agent.send("x", tmp_path).cost_usd is None
 
     def test_detection_is_shared_across_agents_in_a_process(self, tmp_path):
         from duet.adapters import detect_cost_scope
 
-        agent = self._agent(tmp_path, [0.25, 0.60], 'echo "2.1.283 (Claude Code)"; exit 0')
+        agent = self._agent(tmp_path, [0.25, 0.60], ("2.1.283 (Claude Code)", 0))
         agent.send("x", tmp_path)
         assert detect_cost_scope(agent.command[0]) == "session_cumulative_on_resume"
         again = CLIAgent(
