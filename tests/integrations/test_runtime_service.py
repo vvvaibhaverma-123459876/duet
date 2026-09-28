@@ -335,7 +335,8 @@ class TestManagedPeer:
             actions = service.store.read().query("SELECT type, state, participant_id FROM actions WHERE run_id = ? ORDER BY created_at", (joined["run_id"],))
             turns = [a for a in actions if a["type"] == "provider_turn"]
             assert len(turns) == 3 and all(a["state"] == "SUCCEEDED" for a in turns)
-            assert wait_until(lambda: not peer.alive, 10) and adapter.closed  # peers stop with the run
+            # peers stop with the run: stop() ends the thread, then closes the adapter
+            assert wait_until(lambda: not peer.alive and adapter.closed, 10)
             assert not peer.token_file.exists()
         finally:
             service.close()
