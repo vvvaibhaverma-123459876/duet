@@ -131,7 +131,8 @@ def duet(harness, tmp_path):
         full_env.update(env or {})
         return subprocess.run(
             [sys.executable, "-m", "duet", "--config", str(harness["config"]), *args],
-            input=stdin or None,
+            # never the test runner's own stdin (a console on Windows CI): no TTY unless given input
+            **({"input": stdin} if stdin else {"stdin": subprocess.DEVNULL}),
             text=True,
             capture_output=True,
             timeout=120,
@@ -179,8 +180,14 @@ class TestCoreLoop:
     def test_hung_agent_killed_at_timeout_no_zombies(self, duet):
         proc = duet("run", "t", env={"FC_MODE": "hang"})
         assert "timed out after 5s" in proc.stdout + proc.stderr
-        ps = subprocess.run(["pgrep", "-f", "bin/fc"], capture_output=True)
-        assert ps.returncode != 0, "fake agent left running after timeout kill"
+        if os.name == "nt":
+            import psutil
+
+            left = [p for p in psutil.process_iter(["cmdline"]) if any("fc.py" in part for part in (p.info["cmdline"] or []))]
+            assert not left, f"fake agent left running after timeout kill: {left}"
+        else:
+            ps = subprocess.run(["pgrep", "-f", "bin/fc"], capture_output=True)
+            assert ps.returncode != 0, "fake agent left running after timeout kill"
 
     def test_agent_failure_halts_as_agent_error(self, duet):
         proc = duet("run", "t", env={"FC_MODE": "fail"})

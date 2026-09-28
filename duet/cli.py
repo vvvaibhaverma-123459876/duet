@@ -93,7 +93,23 @@ DEMO_TASK = """Implement and verify roman_to_int in the seeded workspace.
 Claude and Codex should collaborate sequentially. The Implementer edits roman.py to satisfy the spec. The Verifier adds useful edge-case tests to test_roman.py and reviews the implementation for bugs, reporting issues back. They iterate. The Broker runs PytestVerifier after each turn; the session succeeds only when pytest actually passes."""
 
 
+def _utf8_when_redirected() -> None:
+    """Windows writes redirected output in the legacy code page (cp1252),
+    which cannot encode the ✓ and ↳ DUET prints, and the process dies with
+    UnicodeEncodeError. Pipes and files get UTF-8 instead; a real console
+    already receives Unicode and is left alone."""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_when_redirected()
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv and not sys.stdin.isatty():
         argv = ["run", sys.stdin.read()]
@@ -768,7 +784,10 @@ def _stop(args) -> int:
         for index, target in enumerate(targets, start=1):
             note = "  <- may be the Claude Code session you are typing in" if target.kind == "claude" else ""
             print(f"  {index}. {target.describe()}{note}")
-        answer = input("Stop which? (number, 'all', or q to abort): ").strip().lower()
+        try:
+            answer = input("Stop which? (number, 'all', or q to abort): ").strip().lower()
+        except EOFError:  # input closed: nobody confirmed
+            answer = ""
         if answer in ("q", "quit", ""):
             print("Aborted; nothing stopped.")
             return 0

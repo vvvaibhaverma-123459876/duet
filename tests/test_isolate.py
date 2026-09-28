@@ -319,7 +319,7 @@ def duet(harness, tmp_path):
         full_env.update(env or {})
         return subprocess.run(
             [sys.executable, "-m", "duet", "--config", str(config or harness["config"]), *args],
-            input=stdin or None,
+            **({"input": stdin} if stdin else {"stdin": subprocess.DEVNULL}),
             text=True,
             capture_output=True,
             timeout=120,
