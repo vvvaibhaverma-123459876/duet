@@ -22,7 +22,7 @@ and what remains unproven.*
   - Reversible client integrations.
   - Hardening.
   - Every acceptance test has automated evidence or explicit disclosure (`ACCEPTANCE_RESULTS.md`).
-- **Where:** Linux, Python 3.11 and 3.13, root and non-root (CI and local). macOS, Python 3.13: the full suite passes in CI (`8f69b81`); the job is still non-blocking, and `COMPATIBILITY.md` lists the differences. Windows is unsupported.
+- **Where:** Linux, Python 3.11 and 3.13, root and non-root (CI and local). macOS, Python 3.13: the full suite passes in CI (`8f69b81`); the job is still non-blocking, and `COMPATIBILITY.md` lists the differences. Native Windows, Python 3.13: the full suite passes in CI (`4ef4359`, 877 passed, 33 POSIX-only skips); the job is still non-blocking, real CLIs are unproven on Windows, and `COMPATIBILITY.md` lists the differences. `WINDOWS_LAPTOP_TEST.md` is the real-CLI procedure.
 - **Control modes:**
   - Managed sessions: push delivery, with model and effort enforced per turn where the CLI exposes them.
   - Native sessions: checkpoint delivery (plus the optional Stop hook), with advisory model and effort. Subagents are not controlled.
