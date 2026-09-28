@@ -11,6 +11,7 @@ import sys
 import time
 
 import pytest
+from exeshim import make_exe
 from pairkit import MUL, PY, coordinator, live_host, make_repo
 
 from duet.runtime.contracts import CONTROLLER, PolicyDenied, StaleLease
@@ -143,9 +144,7 @@ def test_stopping_duet_leaves_unrelated_sessions_alone(tmp_path):
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    claude = fake_bin / "claude"
-    claude.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
-    claude.chmod(0o755)
+    claude = make_exe(fake_bin, "claude", source="import time\ntime.sleep(60)\n")
     unrelated = subprocess.Popen([str(claude)])
     paths = ServicePaths.for_root(tmp_path / "state")
     peers: dict = {}

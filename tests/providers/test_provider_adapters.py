@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
 from duet.adapters import AgentTimeoutError, AuthError, BillingError, ModelUnavailableError, OutputLimitError, QuotaError
 from duet.providers.base import TurnRequest, UnsupportedSetting, lineage_for
@@ -26,10 +27,7 @@ FIXTURES = HERE.parent / "fixtures" / "provider_protocols"
 
 
 def shim(tmp_path: Path, name: str, script: str) -> str:
-    path = tmp_path / name
-    path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{EMU / script}" "$@"\n')
-    path.chmod(0o755)
-    return str(path)
+    return str(make_exe(tmp_path, name, script=EMU / script))
 
 
 @pytest.fixture()

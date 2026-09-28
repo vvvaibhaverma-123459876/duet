@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
 from duet.providers.base import SettingsRecord, TurnRequest, TurnResult, UsageObservation
 from duet.providers.claude_cli import ClaudeCLIAdapter
@@ -184,10 +185,7 @@ class TestCodexObservations:
 
 
 def shim(tmp_path: Path, name: str, script: str) -> str:
-    path = tmp_path / name
-    path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{EMU / script}" "$@"\n')
-    path.chmod(0o755)
-    return str(path)
+    return str(make_exe(tmp_path, name, script=EMU / script))
 
 
 class TestEmulatedProviders:

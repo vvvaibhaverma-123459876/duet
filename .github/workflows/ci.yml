@@ -72,6 +72,8 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install (with the optional MCP SDK)
-        run: pip install -e ".[test,mcp]"
+        # pytest-timeout: a hang fails that test with a stack dump instead of
+        # consuming the whole job.
+        run: pip install -e ".[test,mcp]" pytest-timeout
       - name: Suite on Windows
-        run: pytest -q -rfE
+        run: pytest -q -rfE --timeout=420 --timeout-method=thread

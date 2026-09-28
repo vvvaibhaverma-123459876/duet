@@ -156,7 +156,7 @@ def run_bounded(
     the call."""
     started = time.monotonic()
     proc = subprocess.Popen(
-        cmd,
+        oscompat.resolve_argv(cmd),
         cwd=cwd,
         env=env,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
@@ -371,7 +371,7 @@ def stream_process(
 
     started = time.monotonic()
     proc = subprocess.Popen(
-        cmd,
+        oscompat.resolve_argv(cmd),
         cwd=cwd,
         env=env,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,

@@ -46,7 +46,7 @@ class JsonRpcProcess:
         max_line_bytes: int = MAX_LINE_BYTES,
     ) -> None:
         self.proc = subprocess.Popen(
-            argv,
+            oscompat.resolve_argv(argv),
             cwd=cwd,
             env=env,
             stdin=subprocess.PIPE,

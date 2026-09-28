@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
 pytest.importorskip("mcp")
 from pairkit import MUL, PY, git, make_repo  # noqa: E402
@@ -27,10 +28,7 @@ EMULATORS = Path(__file__).resolve().parents[1] / "providers" / "emulators"
 
 
 def shim(bin_dir: Path, name: str, script: str) -> Path:
-    path = bin_dir / name
-    path.write_text(f'#!/bin/sh\nexec "{PY}" "{EMULATORS / script}" "$@"\n')
-    path.chmod(0o755)
-    return path
+    return make_exe(bin_dir, name, script=EMULATORS / script, python=PY)
 
 
 def test_duet_pair_with_emulated_managed_sessions(tmp_path):

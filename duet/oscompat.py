@@ -237,6 +237,19 @@ def join_command(argv: list[str]) -> str:
     return shlex.join(argv)
 
 
+def resolve_argv(argv: list[str]) -> list[str]:
+    """Windows: CreateProcess finds only `name.exe` for a bare name, not the
+    `name.cmd` launcher npm installs, so look the program up with PATHEXT
+    first. POSIX exec already searches PATH."""
+    if IS_WINDOWS and argv and not os.path.dirname(argv[0]):  # pragma: no cover
+        import shutil
+
+        found = shutil.which(argv[0])
+        if found:
+            return [found, *argv[1:]]
+    return list(argv)
+
+
 def is_batch_launcher(path: str) -> bool:
     """A Windows .cmd/.bat file runs through cmd.exe, which re-parses its
     arguments (%VAR% expansion, & | < > ^). DUET must not pass free text to
@@ -246,7 +259,7 @@ def is_batch_launcher(path: str) -> bool:
 
 __all__ = [
     "IS_WINDOWS", "LockBusy", "detached_kwargs", "group_exists", "is_batch_launcher", "join_command", "kill_tree", "lock_file",
-    "own_group_kwargs", "parent_pid", "pid_exists", "signal_group", "split_command", "unlock_file", "user_key",
+    "own_group_kwargs", "parent_pid", "pid_exists", "resolve_argv", "signal_group", "split_command", "unlock_file", "user_key",
     "windows_parent_pid", "windows_process_start",
 ]
 

@@ -146,8 +146,8 @@ class ClaudeCLIAdapter:
     def capabilities(self) -> ProviderCapabilities:
         if self._caps is None:
             if self._help_text is None or self._version_text is None:
-                self._version_text = subprocess.run([self.binary, "--version"], capture_output=True, text=True, timeout=30).stdout
-                self._help_text = subprocess.run([self.binary, "--help"], capture_output=True, text=True, timeout=30).stdout
+                self._version_text = subprocess.run(oscompat.resolve_argv([self.binary, "--version"]), capture_output=True, text=True, timeout=30).stdout
+                self._help_text = subprocess.run(oscompat.resolve_argv([self.binary, "--help"]), capture_output=True, text=True, timeout=30).stdout
             self._caps = discover_from_help(self._help_text, self._version_text)
             self._flags = help_flags(self._help_text)
         return self._caps
