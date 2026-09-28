@@ -323,7 +323,8 @@ class TestManagedPeer:
                 if answer:
                     break
             assert answer and not answer["body"].startswith(FALLBACK_PREFIX)
-            assert [e[0] for e in log[:2]] == ["asked", "answered"]
+            # the fake records "answered" after its send returns, which can be after we see the message
+            assert wait_until(lambda: [e[0] for e in log[:2]] == ["asked", "answered"], 10), log
             assert len(adapter.requests) == 2 and adapter.requests[1].session_id == "sess-1"  # same managed session resumed
 
             claimed = me.call("claim")
