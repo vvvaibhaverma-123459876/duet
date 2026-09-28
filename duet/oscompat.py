@@ -276,10 +276,30 @@ def claude_hook_argv(command: str) -> list[str] | None:
     platform shell (no bash found)."""
     if not IS_WINDOWS:
         return ["/bin/sh", "-c", command]
-    import shutil  # pragma: no cover
-
-    bash = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH") or shutil.which("bash")  # pragma: no cover
+    bash = git_bash()  # pragma: no cover
     return [bash, "-c", command] if bash else None  # pragma: no cover
+
+
+def git_bash() -> str | None:  # pragma: no cover - Windows only
+    """Git for Windows' bash, found the way Claude Code finds it:
+    CLAUDE_CODE_GIT_BASH_PATH, else bin\\bash.exe beside the git on PATH.
+    Never System32\\bash.exe, which is the WSL launcher, not Git Bash."""
+    import shutil
+    from pathlib import Path
+
+    configured = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+    if configured and Path(configured).is_file():
+        return configured
+    git = shutil.which("git")
+    if git:
+        root = Path(git).resolve().parent.parent  # <Git>\\cmd\\git.exe or <Git>\\bin\\git.exe
+        for candidate in (root / "bin" / "bash.exe", root / "usr" / "bin" / "bash.exe"):
+            if candidate.is_file():
+                return str(candidate)
+    found = shutil.which("bash")
+    if found and "system32" not in found.lower():
+        return found
+    return None
 
 
 def remove_tree(path: "os.PathLike[str] | str") -> None:
@@ -313,7 +333,7 @@ def is_batch_launcher(path: str) -> bool:
 
 __all__ = [
     "IS_WINDOWS", "LockBusy", "detached_kwargs", "group_exists", "is_batch_launcher", "join_command", "kill_tree", "lock_file",
-    "claude_hook_argv", "own_group_kwargs", "parent_pid", "pid_exists", "remove_tree", "resolve_argv", "shell_argv", "signal_group", "split_command", "unlock_file", "user_key",
+    "claude_hook_argv", "git_bash", "own_group_kwargs", "parent_pid", "pid_exists", "remove_tree", "resolve_argv", "shell_argv", "signal_group", "split_command", "unlock_file", "user_key",
     "windows_parent_pid", "windows_process_start",
 ]
 
