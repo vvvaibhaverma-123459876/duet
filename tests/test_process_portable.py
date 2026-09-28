@@ -10,6 +10,7 @@ from pathlib import Path
 
 from duet import oscompat
 from duet.providers.process import run_bounded, stream_process
+from duet.runtime.identity import process_start
 
 PY = sys.executable
 
@@ -38,9 +39,11 @@ def grandchild(pidfile: Path, timeout: float = 10.0) -> int:
 
 
 def gone(pid: int, within: float = 10.0) -> bool:
+    """Exited: no such pid, or (POSIX) a zombie. An orphan's zombie stays
+    until PID 1 reaps it, and in a container PID 1 may never do so."""
     deadline = time.monotonic() + within
     while time.monotonic() < deadline:
-        if not oscompat.pid_exists(pid):
+        if not oscompat.pid_exists(pid) or process_start(pid) is None:
             return True
         time.sleep(0.1)
     return False
