@@ -138,6 +138,25 @@ def test_native_claude_and_native_codex_pair_over_mcp(tmp_path, state):
             assert profile["decision"] == "declined"
 
     anyio.run(scenario)
+    if os.name == "nt":
+        # The MCP Python SDK runs each server in a kill-on-close job object
+        # that forbids breaking away, so the service the first proxy started
+        # ends with that client. The next DUET call starts it again; the
+        # run and its evidence are in the store (docs/duet-v2/COMPATIBILITY.md).
+        import time
+
+        from duet.runtime.service import DomainError, ensure_service
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:  # let the job finish tearing down
+            try:
+                ServiceClient(paths_for(state)).ping(timeout=1)
+            except (DomainError, OSError):
+                break
+            time.sleep(0.2)
+        ensure_service(paths_for(state))
+        runs = ServiceClient.as_controller(paths_for(state)).call("runs")
+        assert runs and runs[0]["lifecycle"] == "COMPLETED_VERIFIED"  # the finished run survived the restart
     ping = ServiceClient(paths_for(state)).ping()
     assert ping["pid"] != os.getpid()  # started on demand as its own process, exactly one
 
