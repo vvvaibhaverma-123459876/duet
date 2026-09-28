@@ -26,7 +26,14 @@ from ..runtime.paths import ensure_private_dir
 from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
 from .acceptance import CheckSpec
 
-BASE_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM", "SYSTEMROOT", "COMSPEC")
+BASE_ENV_ALLOW = (
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM", "SYSTEMROOT", "COMSPEC",
+    # Windows: what programs need to start, find their launchers, write
+    # temporary files and locate the user's profile. Names absent on POSIX,
+    # so POSIX environment fingerprints are unchanged.
+    "PATHEXT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+)
 MAX_CHECK_OUTPUT = 1024 * 1024
 _NO_TESTS = (
     re.compile(r"\bno tests ran\b", re.I),

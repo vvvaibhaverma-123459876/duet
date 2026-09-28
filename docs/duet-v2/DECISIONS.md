@@ -519,3 +519,17 @@ validators. D04 code is unchanged.
 - Pairing is not promoted to the default strategy. `duet run` keeps its legacy behaviour.
 - Where the specification allows "otherwise disclose incomplete control" (AT43, AT45), disclosure is the implemented behaviour and is tested through `duet capabilities`.
 - The final report now exports resources (usage per provider and metric, with unknowns counted; actions by type and state) alongside the policy, so AT48's "resources" is part of the export.
+
+## D-036: Native Windows through one platform layer (Windows port)
+
+- **One module owns OS differences.** `duet/oscompat.py` is the single place for them. POSIX code paths are unchanged, and the Linux and macOS suites must stay green.
+- **No `os.kill(pid, 0)`.** On Windows it terminates the process, so every liveness check goes through `oscompat.pid_exists`.
+- **psutil on Windows only.** The Windows process calls (creation time, parent, descendants) come from `psutil`, declared only for `sys_platform == "win32"`. Hand-written `ctypes` could not be tested on a Windows machine here.
+- **Tree kill.** On Windows, stopping a child kills its whole tree, children first. A dead parent's children are found through their recorded parent pid. Only processes created after the child count, so a reused pid is never mistaken for a descendant.
+- **Transport.** There are no Unix sockets on Windows. The service listens on `127.0.0.1` at an ephemeral port, recorded in a private endpoint file. Every request, including `ping`, must carry a per-start access key read from the private state directory. Loopback is reachable by other local users; the key is not.
+- **No boot id.** Windows derives its boot time from the uptime, which jitters. Process creation times are exact and never repeat across boots, so they alone distinguish a reused pid.
+- **Batch launchers.** DUET never passes free text as an argument to a `.cmd` or `.bat` launcher, because `cmd.exe` re-parses those arguments. Instead:
+  - extra instructions go on stdin;
+  - the MCP config goes in a file;
+  - any other argument with shell metacharacters is refused.
+- **Evidence.** Windows is claimed only from real runs, never from the code alone: the `test-windows` CI job first, then a person's laptop with real CLIs.
