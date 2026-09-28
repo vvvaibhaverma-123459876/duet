@@ -36,7 +36,29 @@ def run_pair(argv: list[str], *, env: dict, cwd: Path, state: Path, timeout: flo
         err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
         logs = sorted(state.rglob("service.log"))
         tail = logs[0].read_text(errors="replace")[-4000:] if logs else "(no service log)"
-        pytest.fail(f"duet pair timed out after {timeout}s | stderr: {err[-1500:]!r} | service log tail: {tail!r}")
+        pytest.fail(f"duet pair timed out after {timeout}s | stderr: {err[-1500:]!r} | service log tail: {tail!r} | {_run_state(state)}")
+
+
+def _run_state(state: Path) -> str:
+    """Actions, participants and messages of the stuck run, read straight
+    from the store (the service may still hold it open, so read-only)."""
+    import sqlite3
+
+    dbs = sorted(state.rglob("duet.db"))
+    if not dbs:
+        return "(no database)"
+    try:
+        con = sqlite3.connect(f"file:{dbs[0]}?mode=ro", uri=True, timeout=5)
+        con.row_factory = sqlite3.Row
+        out = []
+        for sql in ("SELECT type, state, participant_id, substr(result_json, 1, 400) AS result, reconciliation FROM actions ORDER BY created_at",
+                    "SELECT provider, origin, liveness FROM participants",
+                    "SELECT kind, sender, state, substr(body, 1, 200) AS body FROM messages ORDER BY rowid"):
+            out.append([dict(r) for r in con.execute(sql)])
+        con.close()
+        return f"actions: {out[0]!r} | participants: {out[1]!r} | messages: {out[2]!r}"[:6000]
+    except Exception as exc:  # diagnostics only
+        return f"(could not read the store: {exc})"
 
 
 def shim(bin_dir: Path, name: str, script: str) -> Path:

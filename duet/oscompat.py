@@ -236,6 +236,26 @@ def unlock_file(handle: IO) -> None:
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def is_interactive(stream: Any) -> bool:
+    """Whether `stream` is a terminal a person types into. On Windows the
+    NUL device reports isatty() too, so only a real console counts there."""
+    try:
+        if not stream.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if not IS_WINDOWS:
+        return True
+    try:  # pragma: no cover - Windows only
+        import ctypes
+
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(ctypes.c_void_p(handle), ctypes.byref(mode)))
+    except (AttributeError, OSError, ValueError):  # pragma: no cover
+        return False
+
+
 # --- users and commands -------------------------------------------------------------------
 
 
@@ -357,7 +377,7 @@ def is_batch_launcher(path: str) -> bool:
 
 
 __all__ = [
-    "IS_WINDOWS", "LockBusy", "detached_kwargs", "group_exists", "is_batch_launcher", "join_command", "kill_tree", "lock_file",
+    "IS_WINDOWS", "LockBusy", "detached_kwargs", "group_exists", "is_batch_launcher", "is_interactive", "join_command", "kill_tree", "lock_file",
     "claude_hook_argv", "git_bash", "own_group_kwargs", "parent_pid", "pid_exists", "remove_tree", "resolve_argv", "shell_argv", "spawn_detached", "signal_group", "split_command", "unlock_file", "user_key",
     "windows_parent_pid", "windows_process_start",
 ]

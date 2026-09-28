@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import oscompat
 from . import __version__, cli_v2
 from .adapters import AgentError
 from .broker import exit_code_for, run_session
@@ -111,7 +112,7 @@ def _utf8_when_redirected() -> None:
 def main(argv: list[str] | None = None) -> int:
     _utf8_when_redirected()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv and not sys.stdin.isatty():
+    if not argv and not oscompat.is_interactive(sys.stdin):
         argv = ["run", sys.stdin.read()]
 
     parser = argparse.ArgumentParser(prog="duet")
@@ -772,7 +773,7 @@ def _stop(args) -> int:
         what = args.kind or "duet/claude/codex"
         print(f"Nothing to stop: no running {what} sessions found.", file=sys.stderr)
         return 1
-    interactive = sys.stdin.isatty()
+    interactive = oscompat.is_interactive(sys.stdin)
     if not interactive and not args.yes:
         print("Refusing to stop without confirmation: pass --yes (and a kind) when not on a TTY.", file=sys.stderr)
         return 1
