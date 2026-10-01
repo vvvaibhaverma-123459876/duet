@@ -15,17 +15,14 @@ import sys
 import time
 
 from ..runtime.identity import ProcessIdentity
+from .. import oscompat
 from ..runtime.service import ServiceClient, ServicePaths, service_running
 
 MAX_ANCESTORS = 6
 
 
 def _parent(pid: int) -> int | None:
-    try:
-        with open(f"/proc/{pid}/stat", encoding="utf-8") as handle:
-            return int(handle.read().rsplit(")", 1)[1].split()[1])
-    except (OSError, ValueError, IndexError):
-        return None
+    return oscompat.parent_pid(pid)
 
 
 def find_session_token(paths: ServicePaths, start_pid: int | None = None) -> str | None:

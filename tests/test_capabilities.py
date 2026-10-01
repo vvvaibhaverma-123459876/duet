@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 import subprocess
 from pathlib import Path
 
 import pytest
+from exeshim import fake_agent
 
 from duet.adapters import AgentResult, CLIAgent, QuotaError
 from duet.broker import run_session
@@ -25,8 +27,8 @@ def make_repo(tmp_path: Path) -> Path:
 
 class TestVerifiers:
     def test_command_verifier_pass_and_fail(self, tmp_path):
-        assert CommandVerifier("true").verify(tmp_path).status == "passed"
-        result = CommandVerifier("echo nope >&2; exit 3").verify(tmp_path)
+        assert CommandVerifier(f'"{sys.executable}" -c "pass"').verify(tmp_path).status == "passed"
+        result = CommandVerifier(f'"{sys.executable}" -c "import sys; sys.stderr.write(\'nope\'); sys.exit(3)"').verify(tmp_path)
         assert result.status == "failed" and "nope" in result.output
 
     def test_command_verifier_timeout_fails(self, tmp_path):
@@ -162,10 +164,8 @@ class TestBudget:
 
 class TestCostParsing:
     def test_cost_parsed_from_json_output(self, tmp_path):
-        script = tmp_path / "fake"
         payload = json.dumps({"result": "ok", "session_id": "s", "total_cost_usd": 0.0421})
-        script.write_text(f"#!/bin/sh\ncat > /dev/null\necho '{payload}'\n")
-        script.chmod(0o755)
+        script = fake_agent(tmp_path, stdout=payload)
         agent = CLIAgent(
             name="claude",
             display_name="Claude",
@@ -180,9 +180,7 @@ class TestCostParsing:
         assert agent.send("hi", tmp_path).cost_usd == pytest.approx(0.0421)
 
     def test_missing_cost_path_is_unknown_not_zero(self, tmp_path):
-        script = tmp_path / "fake"
-        script.write_text('#!/bin/sh\ncat > /dev/null\necho \'{"result":"ok"}\'\n')
-        script.chmod(0o755)
+        script = fake_agent(tmp_path, stdout='{"result":"ok"}')
         agent = CLIAgent(
             name="claude",
             display_name="Claude",
@@ -199,9 +197,7 @@ class TestCostParsing:
 
 class TestQuotaMarkers:
     def _agent(self, tmp_path, markers):
-        script = tmp_path / "fake"
-        script.write_text("#!/bin/sh\ncat > /dev/null\necho 'Fehler: Kontingent aufgebraucht' >&2\nexit 1\n")
-        script.chmod(0o755)
+        script = fake_agent(tmp_path, stderr="Fehler: Kontingent aufgebraucht", code=1)
         return CLIAgent(
             name="codex",
             display_name="Codex",

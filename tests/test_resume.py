@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from exeshim import fake_agent
 
 from duet.resumestate import ResumeError, ResumeState, load_resume_state, resume_path, save_resume_state
 
@@ -60,9 +61,7 @@ class TestLastSessionId:
     def test_send_records_last_session_id_without_chaining(self, tmp_path):
         from duet.adapters import CLIAgent
 
-        script = tmp_path / "fake"
-        script.write_text('#!/bin/sh\ncat > /dev/null\necho \'{"result":"ok","session_id":"sid-9"}\'\n')
-        script.chmod(0o755)
+        script = fake_agent(tmp_path, stdout='{"result":"ok","session_id":"sid-9"}')
         agent = CLIAgent(
             name="claude",
             display_name="Claude",

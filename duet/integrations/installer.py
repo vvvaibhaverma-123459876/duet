@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
+from .. import oscompat
 from ..runtime.paths import ensure_private_dir, state_dir
 
 ITEMS = ("claude-mcp", "codex-mcp", "claude-skill", "claude-statusline", "claude-stop-hook")
@@ -109,11 +110,11 @@ class Installer:
 
     @staticmethod
     def _statusline_command() -> str:
-        return " ".join(duet_command() + ["statusline"])
+        return oscompat.join_command(duet_command() + ["statusline"])
 
     @staticmethod
     def _hook_command() -> str:
-        return " ".join(duet_command() + ["hook", "claude-stop"])
+        return oscompat.join_command(duet_command() + ["hook", "claude-stop"])
 
     # -- plan --------------------------------------------------------------------------
 

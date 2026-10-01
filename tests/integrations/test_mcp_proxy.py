@@ -35,6 +35,10 @@ def proxy(state: Path, *, wrapped: bool = False) -> StdioServerParameters:
     """wrapped: launch through a shell so the proxy's host process (its
     parent) differs from the test process, like a second agent CLI."""
     env = {"DUET_STATE_DIR": str(state), "PYTHONPATH": os.pathsep.join(sys.path)}
+    if wrapped and os.name == "nt":
+        comspec = os.environ.get("COMSPEC", "cmd.exe")
+        env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
+        return StdioServerParameters(command=comspec, args=["/d", "/c", PY, "-m", "duet", "mcp", "serve"], env=env)
     if wrapped:
         return StdioServerParameters(command="/bin/sh", args=["-c", f'"{PY}" -m duet mcp serve; exit $?'], env=env)
     return StdioServerParameters(command=PY, args=["-m", "duet", "mcp", "serve"], env=env)
@@ -134,6 +138,25 @@ def test_native_claude_and_native_codex_pair_over_mcp(tmp_path, state):
             assert profile["decision"] == "declined"
 
     anyio.run(scenario)
+    if os.name == "nt":
+        # The MCP Python SDK runs each server in a kill-on-close job object
+        # that forbids breaking away, so the service the first proxy started
+        # ends with that client. The next DUET call starts it again; the
+        # run and its evidence are in the store (docs/duet-v2/COMPATIBILITY.md).
+        import time
+
+        from duet.runtime.service import DomainError, ensure_service
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:  # let the job finish tearing down
+            try:
+                ServiceClient(paths_for(state)).ping(timeout=1)
+            except (DomainError, OSError):
+                break
+            time.sleep(0.2)
+        ensure_service(paths_for(state))
+        runs = ServiceClient.as_controller(paths_for(state)).call("runs")
+        assert runs and runs[0]["lifecycle"] == "COMPLETED_VERIFIED"  # the finished run survived the restart
     ping = ServiceClient(paths_for(state)).ping()
     assert ping["pid"] != os.getpid()  # started on demand as its own process, exactly one
 

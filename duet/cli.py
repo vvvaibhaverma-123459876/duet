@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import oscompat
 from . import __version__, cli_v2
 from .adapters import AgentError
 from .broker import exit_code_for, run_session
@@ -93,9 +94,25 @@ DEMO_TASK = """Implement and verify roman_to_int in the seeded workspace.
 Claude and Codex should collaborate sequentially. The Implementer edits roman.py to satisfy the spec. The Verifier adds useful edge-case tests to test_roman.py and reviews the implementation for bugs, reporting issues back. They iterate. The Broker runs PytestVerifier after each turn; the session succeeds only when pytest actually passes."""
 
 
+def _utf8_when_redirected() -> None:
+    """Windows writes redirected output in the legacy code page (cp1252),
+    which cannot encode the ✓ and ↳ DUET prints, and the process dies with
+    UnicodeEncodeError. Pipes and files get UTF-8 instead; a real console
+    already receives Unicode and is left alone."""
+    if os.name != "nt":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if not stream.isatty():
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_when_redirected()
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv and not sys.stdin.isatty():
+    if not argv and not oscompat.is_interactive(sys.stdin):
         argv = ["run", sys.stdin.read()]
 
     parser = argparse.ArgumentParser(prog="duet")
@@ -756,7 +773,7 @@ def _stop(args) -> int:
         what = args.kind or "duet/claude/codex"
         print(f"Nothing to stop: no running {what} sessions found.", file=sys.stderr)
         return 1
-    interactive = sys.stdin.isatty()
+    interactive = oscompat.is_interactive(sys.stdin)
     if not interactive and not args.yes:
         print("Refusing to stop without confirmation: pass --yes (and a kind) when not on a TTY.", file=sys.stderr)
         return 1
@@ -768,7 +785,10 @@ def _stop(args) -> int:
         for index, target in enumerate(targets, start=1):
             note = "  <- may be the Claude Code session you are typing in" if target.kind == "claude" else ""
             print(f"  {index}. {target.describe()}{note}")
-        answer = input("Stop which? (number, 'all', or q to abort): ").strip().lower()
+        try:
+            answer = input("Stop which? (number, 'all', or q to abort): ").strip().lower()
+        except EOFError:  # input closed: nobody confirmed
+            answer = ""
         if answer in ("q", "quit", ""):
             print("Aborted; nothing stopped.")
             return 0
@@ -861,7 +881,9 @@ def _install_signal_handlers() -> None:
     def _raise_interrupt(signum, frame):
         raise KeyboardInterrupt()
 
-    for sig in (signal.SIGTERM,):
+    # Windows: Ctrl+Break (and CTRL_BREAK_EVENT from a supervisor) is the
+    # console's stop request for a process group; Ctrl+C already raises.
+    for sig in (signal.SIGTERM, *( (signal.SIGBREAK,) if hasattr(signal, "SIGBREAK") else ())):
         try:
             signal.signal(sig, _raise_interrupt)
         except (ValueError, OSError):

@@ -648,7 +648,8 @@ class TestProcessIdentity:
     def test_other_host_is_not_judged(self):
         assert replace(ProcessIdentity.current(), host="elsewhere.example").is_alive()
 
-    @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="exact non-spawning liveness needs /proc; elsewhere it is conservative (TestLivenessWithoutProcfs)")
+    @pytest.mark.skipif(not (Path("/proc/self/stat").exists() or os.name == "nt"),
+                        reason="exact non-spawning liveness needs /proc or Windows; macOS is conservative (TestLivenessWithoutProcfs)")
     def test_non_spawning_mode_matches_full_check_with_procfs(self):
         me = ProcessIdentity.current()
         assert me.is_alive(allow_subprocess=False)
@@ -677,6 +678,7 @@ def test_identities_fit_the_id_limit_with_long_hosts_and_darwin_boot_times(monke
     assert replace(ident, host="elsewhere.example").is_alive()  # another host is never judged
 
 
+@pytest.mark.skipif(os.name == "nt", reason="simulates macOS (sysctl/ps); Windows reads process times without a subprocess")
 class TestLivenessWithoutProcfs:
     """Review finding: on platforms without /proc (macOS) the liveness check
     spawns `sysctl`/`ps`, and it ran inside write transactions (lease

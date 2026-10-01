@@ -226,8 +226,9 @@ class TestSnapshots:
         (ws.path / "app.py").write_text("print('changed')\n")
         b = capture_snapshot(ws.path)
         assert b.tree_hash != a.tree_hash
-        os.chmod(ws.path / "app.py", 0o755)
-        assert capture_snapshot(ws.path).tree_hash != b.tree_hash
+        if os.name != "nt":  # Windows files have no executable bit to track
+            os.chmod(ws.path / "app.py", 0o755)
+            assert capture_snapshot(ws.path).tree_hash != b.tree_hash
 
     def test_materialized_snapshot_is_immutable_copy(self, env, tmp_path):
         rt, manager, repo, run = env

@@ -26,12 +26,15 @@ for a user who deliberately wants API billing; nothing in DUET sets it. The
 removed names (never their values) are reported in the turn's warnings."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
 import subprocess
 import threading
 import time
 
+from .. import oscompat
 from ..adapters import (
     CUMULATIVE_RESUME_COST_SINCE,
     AgentError,
@@ -143,8 +146,8 @@ class ClaudeCLIAdapter:
     def capabilities(self) -> ProviderCapabilities:
         if self._caps is None:
             if self._help_text is None or self._version_text is None:
-                self._version_text = subprocess.run([self.binary, "--version"], capture_output=True, text=True, timeout=30).stdout
-                self._help_text = subprocess.run([self.binary, "--help"], capture_output=True, text=True, timeout=30).stdout
+                self._version_text = subprocess.run(oscompat.resolve_argv([self.binary, "--version"]), capture_output=True, text=True, timeout=30).stdout
+                self._help_text = subprocess.run(oscompat.resolve_argv([self.binary, "--help"]), capture_output=True, text=True, timeout=30).stdout
             self._caps = discover_from_help(self._help_text, self._version_text)
             self._flags = help_flags(self._help_text)
         return self._caps
@@ -219,6 +222,9 @@ class ClaudeCLIAdapter:
                 raise UnsupportedSetting("this Claude Code version has no provider-enforced budget cap")
             cmd += ["--max-budget-usd", str(request.max_budget_usd)]
             accepted["max_budget_usd"] = str(request.max_budget_usd)
+        if oscompat.is_batch_launcher(shutil.which(self.binary) or self.binary):
+            cmd = _batch_safe(cmd)
+            accepted["batch_launcher"] = True
         return cmd, requested, accepted
 
     def run_turn(self, request: TurnRequest, *, on_event: EventCallback | None = None, cancel: threading.Event | None = None) -> TurnResult:
@@ -239,7 +245,7 @@ class ClaudeCLIAdapter:
                 on_line=on_line,
                 cwd=request.cwd,
                 env=env,
-                stdin_data=request.prompt,
+                stdin_data=_batch_prompt(request) if accepted.get("batch_launcher") else request.prompt,
                 timeout=request.timeout_seconds,
                 cancel_event=cancel,
                 max_line_bytes=self.max_line_bytes,
@@ -375,3 +381,49 @@ class _StreamState:
 # parse_version, cumulative_resume_cost and CUMULATIVE_RESUME_COST_SINCE live in
 # duet.adapters (shared with the legacy CLI agent's cost_json_scope = "auto").
 __all__ = ["CUMULATIVE_RESUME_COST_SINCE", "ClaudeCLIAdapter", "cumulative_resume_cost", "discover_from_help", "help_flags", "parse_version"]
+
+
+# cmd.exe re-parses the arguments of a .cmd/.bat launcher (npm installs
+# `claude.cmd`): %VAR% expands and & | < > ^ " change meaning. Free text never
+# goes there as an argument: extra instructions move to stdin and the MCP
+# config to a file, and anything else with such characters is refused.
+_BATCH_UNSAFE = set('%!^&|<>"\r\n')
+
+
+def _batch_safe(cmd: list[str]) -> list[str]:
+    out: list[str] = []
+    skip = False
+    for index, arg in enumerate(cmd):
+        if skip:
+            skip = False
+            continue
+        if arg == "--append-system-prompt":
+            skip = True  # delivered on stdin instead (_batch_prompt)
+            continue
+        if arg == "--mcp-config" and index + 1 < len(cmd):
+            out += [arg, _config_file(cmd[index + 1])]
+            skip = True
+            continue
+        if index and _BATCH_UNSAFE & set(arg):
+            raise UnsupportedSetting(
+                f"cannot pass {arg[:40]!r} safely to a .cmd launcher; install Claude Code's native claude.exe"
+            )
+        out.append(arg)
+    return out
+
+
+def _batch_prompt(request: "TurnRequest") -> str:
+    if not request.extra_instructions:
+        return request.prompt
+    return f"<instructions>\n{request.extra_instructions}\n</instructions>\n\n{request.prompt}"
+
+
+def _config_file(text: str) -> str:
+    """Write an inline MCP config to a private file and return its path (the
+    config names a token file, never the token itself)."""
+    from ..runtime.paths import ensure_private_dir, state_dir
+
+    folder = ensure_private_dir(state_dir() / "tmp")
+    path = folder / f"mcp-{hashlib.sha256(text.encode()).hexdigest()[:16]}.json"
+    path.write_text(text, encoding="utf-8")
+    return str(path)

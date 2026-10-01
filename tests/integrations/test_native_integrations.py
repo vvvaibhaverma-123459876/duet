@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 from pairkit import PY, coordinator, live_host, make_repo
 
 from duet.integrations.installer import Installer
@@ -19,12 +20,11 @@ from duet.runtime.identity import ProcessIdentity
 from duet.runtime.service import RuntimeService, ServiceClient, ServicePaths
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "telemetry" / "claude" / "statusline-docs-full-schema.json"
-FAKE_CLI = """#!{py}
-import os, sys
+FAKE_CLI = """import os, sys
 state = os.environ["FAKE_MCP_STATE"]
 args = sys.argv[1:]
 open(os.path.join(state, "calls.log"), "a").write(" ".join(args) + "\\n")
-marker = os.path.join(state, os.path.basename(sys.argv[0]) + ".duet")
+marker = os.path.join(state, os.path.splitext(os.path.basename(sys.argv[0]))[0] + ".duet")
 if args[:2] == ["mcp", "get"]:
     sys.exit(0 if os.path.exists(marker) else 1)
 if args[:2] == ["mcp", "add"]:
@@ -40,12 +40,9 @@ def home(tmp_path, monkeypatch):
     bins, state = tmp_path / "bin", tmp_path / "fake-state"
     bins.mkdir()
     state.mkdir()
-    for name in ("claude", "codex"):
-        path = bins / name
-        path.write_text(FAKE_CLI.format(py=sys.executable))
-        path.chmod(0o755)
-    monkeypatch.setenv("DUET_CLAUDE_BIN", str(bins / "claude"))
-    monkeypatch.setenv("DUET_CODEX_BIN", str(bins / "codex"))
+    exes = {name: make_exe(bins, name, source=FAKE_CLI) for name in ("claude", "codex")}
+    monkeypatch.setenv("DUET_CLAUDE_BIN", str(exes["claude"]))
+    monkeypatch.setenv("DUET_CODEX_BIN", str(exes["codex"]))
     monkeypatch.setenv("FAKE_MCP_STATE", str(state))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     settings = tmp_path / "claude-config" / "settings.json"

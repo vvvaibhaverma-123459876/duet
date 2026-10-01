@@ -42,6 +42,11 @@ log = logging.getLogger("duet.peers")
 
 DEFAULT_TURN_TIMEOUT = 900.0
 POLL_SECONDS = 1.0
+# A turn that failed for an ordinary reason (a crash, a bad exit) is retried
+# this many times in a row before the peer stops and says why: waiting for a
+# message after a failed turn can deadlock the pair (nothing else will come).
+MAX_TURN_FAILURES = 2
+RETRY_PAUSE_SECONDS = 2.0
 FALLBACK_PREFIX = "[DUET: delivered from the end of the peer's turn because it did not reply with duet_send] "
 
 
@@ -142,6 +147,7 @@ class ManagedPeer:
         self.ledger = Ledger()
         self._cost_total: Decimal | None = Decimal(0)
         self.turns = 0
+        self._failures = 0  # consecutive ordinary turn failures
         self.results: list[TurnResult] = []
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name=f"duet-peer-{provider}-{run_id[-8:]}", daemon=True)
@@ -478,6 +484,15 @@ class ManagedPeer:
             if result.error is not None and isinstance(result.error, (AuthError, BillingError)):
                 self._give_up(f"{result.error.kind}: {result.error}. DUET does not switch accounts, providers or billing to continue.")
                 return "stop"
+            self._failures += 1
+            reason = str(result.error or result.status)[:500]
+            if self._failures >= MAX_TURN_FAILURES:
+                self._give_up(f"{self._failures} turns in a row failed; last: {reason}")
+                return "stop"
+            log.warning("%s turn failed (%s); retrying once", self.provider, reason)
+            self._stop.wait(RETRY_PAUSE_SECONDS)
+            return "retry"
+        self._failures = 0
         if self._last_sent_seq() == sent_before:
             self._fallback_answers(messages, result)
         # The turn's action is settled now; completion may have been waiting on it.

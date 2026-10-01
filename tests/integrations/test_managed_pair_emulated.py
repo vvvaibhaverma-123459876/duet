@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
 pytest.importorskip("mcp")
 from pairkit import MUL, PY, git, make_repo  # noqa: E402
@@ -26,11 +27,42 @@ from duet.runtime.store import Store  # noqa: E402
 EMULATORS = Path(__file__).resolve().parents[1] / "providers" / "emulators"
 
 
+def run_pair(argv: list[str], *, env: dict, cwd: Path, state: Path, timeout: float = 300) -> subprocess.CompletedProcess:
+    """Run `duet pair`; on a timeout, fail with what DUET said and the tail
+    of its service log, so a hang is diagnosable from the summary alone."""
+    try:
+        return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+    except subprocess.TimeoutExpired as exc:
+        err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        logs = sorted(state.rglob("service.log"))
+        tail = logs[0].read_text(errors="replace")[-4000:] if logs else "(no service log)"
+        pytest.fail(f"duet pair timed out after {timeout}s | stderr: {err[-1500:]!r} | service log tail: {tail!r} | {_run_state(state)}")
+
+
+def _run_state(state: Path) -> str:
+    """Actions, participants and messages of the stuck run, read straight
+    from the store (the service may still hold it open, so read-only)."""
+    import sqlite3
+
+    dbs = sorted(state.rglob("duet.db"))
+    if not dbs:
+        return "(no database)"
+    try:
+        con = sqlite3.connect(f"file:{dbs[0]}?mode=ro", uri=True, timeout=5)
+        con.row_factory = sqlite3.Row
+        out = []
+        for sql in ("SELECT type, state, participant_id, substr(result_json, 1, 400) AS result, reconciliation FROM actions ORDER BY created_at",
+                    "SELECT provider, origin, liveness FROM participants",
+                    "SELECT kind, sender, state, substr(body, 1, 200) AS body FROM messages ORDER BY rowid"):
+            out.append([dict(r) for r in con.execute(sql)])
+        con.close()
+        return f"actions: {out[0]!r} | participants: {out[1]!r} | messages: {out[2]!r}"[:6000]
+    except Exception as exc:  # diagnostics only
+        return f"(could not read the store: {exc})"
+
+
 def shim(bin_dir: Path, name: str, script: str) -> Path:
-    path = bin_dir / name
-    path.write_text(f'#!/bin/sh\nexec "{PY}" "{EMULATORS / script}" "$@"\n')
-    path.chmod(0o755)
-    return path
+    return make_exe(bin_dir, name, script=EMULATORS / script, python=PY)
 
 
 def test_duet_pair_with_emulated_managed_sessions(tmp_path):
@@ -57,10 +89,10 @@ def test_duet_pair_with_emulated_managed_sessions(tmp_path):
         defined = subprocess.run([sys.executable, "-m", "duet", "usage", "pool", "set", *pool], env=env, capture_output=True, text=True, timeout=60)
         assert defined.returncode == 0, defined.stderr
     try:
-        proc = subprocess.run(
+        proc = run_pair(
             [sys.executable, "-m", "duet", "pair", "add mul(a, b) to calc.py", "--repo", str(repo),
              "--check", f'"{PY}" check_feature.py', "--writer", "claude", "--json"],
-            env=env, capture_output=True, text=True, timeout=300, cwd=tmp_path,
+            env=env, cwd=tmp_path, state=state,
         )
         assert proc.returncode == 0, proc.stderr[-3000:] + proc.stdout[-3000:]
         status = json.loads(proc.stdout)
@@ -122,9 +154,9 @@ def test_duet_pair_shares_a_plan_and_both_contribute(tmp_path):
     env.pop("DUET_MANAGED_PEER", None)
     paths = ServicePaths.for_root(state / "v2")
     try:
-        proc = subprocess.run(
+        proc = run_pair(
             [sys.executable, "-m", "duet", "pair", "add mul(a, b) to calc.py", "--repo", str(repo), "--check", f'"{PY}" check_feature.py', "--json"],
-            env=env, capture_output=True, text=True, timeout=300, cwd=tmp_path,
+            env=env, cwd=tmp_path, state=state,
         )
         assert proc.returncode == 0, proc.stderr[-3000:] + proc.stdout[-3000:]
         status = json.loads(proc.stdout)

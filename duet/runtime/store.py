@@ -33,7 +33,10 @@ from .contracts import (
     utc_now,
 )
 
-BUSY_TIMEOUT_MS = 5000
+# How long a writer waits for another's transaction. Transactions are short,
+# but on Windows antivirus scanning of the database and WAL files can stall
+# one for seconds (seen on CI with 5 s); waiting beats failing the call.
+BUSY_TIMEOUT_MS = 30000
 NETWORK_FILESYSTEMS = {
     "nfs", "nfs4", "cifs", "smbfs", "smb3", "sshfs", "fuse.sshfs", "afpfs", "9p", "ceph", "glusterfs",
     "fuse.glusterfs", "davfs", "fuse.davfs2", "lustre", "gpfs", "fuse.s3fs", "fuse.rclone", "virtiofs",

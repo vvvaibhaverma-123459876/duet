@@ -1,10 +1,11 @@
 from __future__ import annotations
-
 import os
 import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import oscompat
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,11 @@ def running_targets(repo: Path, ps_output: str | None = None, self_pid: int | No
 def stop_target(target: StopTarget, force: bool = False) -> str:
     """SIGINT is what Ctrl-C in the agent's own terminal would send, giving it
     a chance to save state; --force escalates to SIGTERM."""
+    if oscompat.IS_WINDOWS:  # pragma: no cover - no SIGINT for another console's process
+        if not oscompat.pid_exists(target.pid):
+            return f"{target.describe()} — already gone"
+        oscompat.kill_tree(target.pid)
+        return f"{target.describe()} — terminated"
     sig = signal.SIGTERM if force else signal.SIGINT
     try:
         os.kill(target.pid, sig)
@@ -80,10 +86,4 @@ def _lock_holder(repo: Path) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    return oscompat.pid_exists(pid)

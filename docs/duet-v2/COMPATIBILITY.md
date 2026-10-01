@@ -15,8 +15,19 @@ Differences from Linux:
 - The Stop hook's session lookup uses `/proc`, so on macOS it finds no session and lets the stop proceed.
 
 Real CLIs have not been run on macOS. |
-| Untested | WSL | Expected to behave as Linux; no evidence yet. |
-| Unsupported | Native Windows | Unix sockets, process groups, `flock` and `/proc` are assumed throughout. |
+| Tested (CI) | Native Windows (GitHub `windows-latest`, Windows Server 2025), Python 3.13, with the MCP SDK | CI job `test-windows`, which is still non-blocking. It passed on `4ef4359` with 877 passed and 33 skipped. The 33 skips are POSIX-mechanics tests (umask, signals, process groups, Unix sockets); each mechanism has a Windows counterpart test. The earlier runs failed and led to fixes that are kept, including two real bugs that also affected Linux and macOS:
+- **A failed first turn deadlocked a pair:** the peer now retries once, then gives up with a reason.
+- **The deliverable was committed after the run was marked complete:** it is now committed first.
+
+Differences from Linux (see `WINDOWS_PORT.md` and `SECURITY_MODEL.md`):
+- **Service transport:** loopback TCP on `127.0.0.1` plus a per-start access key, instead of a private Unix socket. Other local users can reach the port but not use it without the key. The host-ancestry check is skipped, as on macOS.
+- **Private state:** `%LOCALAPPDATA%\duet` relies on its inherited per-user ACL, which DUET does not verify.
+- **Batch launchers:** with `claude.cmd` / `codex.cmd`, free text never goes on the command line. Extra instructions go on stdin and the MCP config in a file; other unsafe arguments are refused.
+- **Service lifetime:** an MCP client that starts the service inside a kill-on-close job object (the MCP Python SDK does this) takes the service down with it. The next call restarts it and the run's state is kept. Whether Claude Code and Codex do the same is step 7 of `WINDOWS_LAPTOP_TEST.md`.
+- **Stopping a turn:** `CTRL_BREAK_EVENT` to the process group, then a tree kill.
+
+Real CLIs have not been run on Windows. `WINDOWS_LAPTOP_TEST.md` is the procedure. |
+| Untested | WSL | Expected to behave as Linux; no evidence yet. A Windows `duet` driving WSL-side CLIs (or the reverse) is not supported. |
 
 No platform is claimed on the strength of mocked platform tests.
 

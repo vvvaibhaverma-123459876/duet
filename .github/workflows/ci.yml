@@ -57,3 +57,23 @@ jobs:
         run: pip install -e ".[test,mcp]"
       - name: Suite on macOS
         run: pytest -q
+
+  test-windows:
+    # Native Windows (docs/duet-v2/WINDOWS_PORT.md). Non-blocking until the
+    # port passes here; COMPATIBILITY.md claims nothing without this evidence.
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - name: Keep line endings as committed (fixtures compare bytes)
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install (with the optional MCP SDK)
+        # pytest-timeout: a hang fails that test with a stack dump instead of
+        # consuming the whole job.
+        run: pip install -e ".[test,mcp]" pytest-timeout
+      - name: Suite on Windows
+        run: pytest -q -rfE --timeout=420 --timeout-method=thread

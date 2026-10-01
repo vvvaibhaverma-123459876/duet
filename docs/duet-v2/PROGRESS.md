@@ -20,6 +20,7 @@ tracked separately; see `CAPABILITY_MATRIX.md` for per-requirement evidence.
 | D12 Native enhancements & coverage | done | see HANDOFF | `duet integrations`, Stop hook, status-line wrapper, `duet capabilities` | 6 new tests; suite 868/6 (core), 873/4 (mcp, root and non-root) | Codex review pending | NOT_RUN (not installed into a real client) |
 | D13 Hardening & compatibility | done | see HANDOFF | `runtime/hygiene.py` (redaction, display sanitising), resolved policy in reports, wheel migration check, macOS CI (non-blocking), SECURITY_MODEL/OPERATIONS/COMPATIBILITY | 20 threat-model/compat tests (7 functions, legacy command parametrised ×13) | Codex review pending | Linux and macOS (CI) |
 | D14 Evaluation & release | done (scope restricted) | see HANDOFF | ACCEPTANCE_RESULTS, EVALUATION (protocol, no results), RELEASE_CHECKLIST, final HANDOFF; AT45/AT47/AT48 evidence; report exports resources | AT47, AT45, AT48 tests | Codex review pending | real pair NOT_RUN; no label met |
+| Windows port (PR #3) | done (CI) | `4ef4359` | `duet/oscompat.py`, loopback service transport with access key, process-tree kill, batch-launcher rule, Windows CI job (non-blocking); fixes a failed-first-turn deadlock and a completion/commit race on every platform | Windows 877/33 (POSIX-only skips), Linux and macOS green on the same commit | Codex review pending | NOT_RUN (real CLIs on Windows: `WINDOWS_LAPTOP_TEST.md`) |
 
 Independent review: Codex is not installed or authenticated in this
 environment, so no Claude–Codex review has taken place. Every milestone

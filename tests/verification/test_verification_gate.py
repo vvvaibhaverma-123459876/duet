@@ -160,7 +160,9 @@ class TestRunner:
 
     def test_shell_mode_is_explicit(self, tmp_path):
         subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-        assert run_check(CheckSpec("sh", shell="test 1 -eq 1 && echo ok"), tmp_path).status == "passed"
+        # the platform's shell: /bin/sh, or cmd.exe on Windows (both know && and echo)
+        outcome = run_check(CheckSpec("sh", shell=f'"{sys.executable}" -c "pass" && echo ok'), tmp_path)
+        assert outcome.status == "passed" and "ok" in outcome.output
 
 
 class TestAcceptanceContract:

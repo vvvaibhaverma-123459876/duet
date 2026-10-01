@@ -12,37 +12,65 @@ import time
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
-FAKE_CLAUDE = r"""#!/bin/bash
-prompt=$(cat)
-[[ "$prompt" == *CLAUDE_DOCTOR_OK* ]] && { echo '{"result":"CLAUDE_DOCTOR_OK","session_id":"doc"}'; exit 0; }
-echo "$@" >> "$BATTERY_STATE/fc-args.log"
-n_file="$BATTERY_STATE/fc-n"; n=$(cat "$n_file" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$n_file"
-case "${FC_MODE:-done}" in
-  done)    [[ $n -ge 2 ]] && r="finishing [[DONE]]" || r="turn $n work [[HANDOFF]]" ;;
-  work)    r="turn $n work [[HANDOFF]]" ;;
-  mention) r="I will not claim completion yet; [[DONE]] comes later"$'\n'"still working [[HANDOFF]]" ;;
-  loop)    r="identical repeated answer every time" ;;
-  hang)    sleep 30; r="too late" ;;
-  edit)    echo "line-$n" >> file.txt; [[ $n -ge 2 ]] && r="edited [[DONE]]" || r="edited [[HANDOFF]]" ;;
-  fail)    echo "boom" >&2; exit 3 ;;
-esac
-python3 -c "import json,sys;print(json.dumps({'result':sys.argv[1],'session_id':f'fc-$n','total_cost_usd':0.25}))" "$r"
+FAKE_CLAUDE = r"""
+import json, os, sys, time
+prompt = sys.stdin.read()
+if "CLAUDE_DOCTOR_OK" in prompt:
+    print(json.dumps({"result": "CLAUDE_DOCTOR_OK", "session_id": "doc"})); sys.exit(0)
+state = os.environ["BATTERY_STATE"]
+with open(os.path.join(state, "fc-args.log"), "a") as log:
+    log.write(" ".join(sys.argv[1:]) + "\n")
+n_file = os.path.join(state, "fc-n")
+try:
+    n = int(open(n_file).read().strip() or 0)
+except OSError:
+    n = 0
+n += 1
+open(n_file, "w").write(f"{n}\n")
+mode = os.environ.get("FC_MODE") or "done"
+if mode == "done":
+    r = "finishing [[DONE]]" if n >= 2 else f"turn {n} work [[HANDOFF]]"
+elif mode == "work":
+    r = f"turn {n} work [[HANDOFF]]"
+elif mode == "mention":
+    r = "I will not claim completion yet; [[DONE]] comes later\nstill working [[HANDOFF]]"
+elif mode == "loop":
+    r = "identical repeated answer every time"
+elif mode == "hang":
+    time.sleep(30); r = "too late"
+elif mode == "edit":
+    with open("file.txt", "a") as f:
+        f.write(f"line-{n}\n")
+    r = "edited [[DONE]]" if n >= 2 else "edited [[HANDOFF]]"
+elif mode == "fail":
+    sys.stderr.write("boom\n"); sys.exit(3)
+print(json.dumps({"result": r, "session_id": f"fc-{n}", "total_cost_usd": 0.25}))
 """
 
-FAKE_CODEX = r"""#!/bin/bash
-prompt=$(cat)
-if [[ "$prompt" == *CODEX_DOCTOR_OK* ]]; then
-  [[ "${FX_MODE:-ok}" == "deadstart" ]] && { echo "usage limit hit" >&2; exit 1; }
-  echo "CODEX_DOCTOR_OK"; exit 0
-fi
-case "${FX_MODE:-ok}" in
-  ok)      echo "reviewed, ok [[DONE]]" ;;
-  loop)    echo "identical codex reply each round" ;;
-  quota)   echo "You've hit your usage limit." >&2; exit 1 ;;
-  quota1)  f="$BATTERY_STATE/fx-failed"; [[ -f $f ]] && echo "recovered [[DONE]]" || { touch $f; echo "rate limit" >&2; exit 1; } ;;
-  deadstart) echo "usage limit" >&2; exit 1 ;;
-esac
+FAKE_CODEX = r"""
+import os, sys
+prompt = sys.stdin.read()
+mode = os.environ.get("FX_MODE") or "ok"
+if "CODEX_DOCTOR_OK" in prompt:
+    if mode == "deadstart":
+        sys.stderr.write("usage limit hit\n"); sys.exit(1)
+    print("CODEX_DOCTOR_OK"); sys.exit(0)
+if mode == "ok":
+    print("reviewed, ok [[DONE]]")
+elif mode == "loop":
+    print("identical codex reply each round")
+elif mode == "quota":
+    sys.stderr.write("You've hit your usage limit.\n"); sys.exit(1)
+elif mode == "quota1":
+    f = os.path.join(os.environ["BATTERY_STATE"], "fx-failed")
+    if os.path.exists(f):
+        print("recovered [[DONE]]")
+    else:
+        open(f, "w").close(); sys.stderr.write("rate limit\n"); sys.exit(1)
+elif mode == "deadstart":
+    sys.stderr.write("usage limit\n"); sys.exit(1)
 """
 
 CONFIG = """\
@@ -54,19 +82,19 @@ loop_threshold = 0.9
 
 [agents.claude]
 display_name = "Claude"
-command = ["{fc}"]
+command = ['{fc}']
 prompt_via = "stdin"
 workspace_flag = ""
 output_format = "json"
 result_json_path = "result"
 session_json_path = "session_id"
 cost_json_path = "total_cost_usd"
-resume_command = ["{fc}", "--resume", "{{session_id}}"]
+resume_command = ['{fc}', "--resume", "{{session_id}}"]
 timeout_seconds = 5
 
 [agents.codex]
 display_name = "Codex"
-command = ["{fx}"]
+command = ['{fx}']
 prompt_via = "stdin"
 workspace_flag = ""
 output_format = "text"
@@ -79,14 +107,11 @@ def harness(tmp_path_factory):
     root = tmp_path_factory.mktemp("battery")
     bindir = root / "bin"
     bindir.mkdir()
-    fc, fx = bindir / "fc", bindir / "fx"
-    fc.write_text(FAKE_CLAUDE)
-    fx.write_text(FAKE_CODEX)
+    fc = make_exe(bindir, "fc", source=FAKE_CLAUDE)
+    fx = make_exe(bindir, "fx", source=FAKE_CODEX)
     # Doctor gates round-trips on shutil.which("claude"/"codex"); provide stubs.
-    (bindir / "claude").symlink_to(fc)
-    (bindir / "codex").symlink_to(fx)
-    for script in (fc, fx):
-        script.chmod(0o755)
+    make_exe(bindir, "claude", source=FAKE_CLAUDE)
+    make_exe(bindir, "codex", source=FAKE_CODEX)
     config = root / "duet.toml"
     config.write_text(CONFIG.format(fc=fc, fx=fx))
     return {"root": root, "bindir": bindir, "config": config}
@@ -99,14 +124,15 @@ def duet(harness, tmp_path):
 
     def run(*args: str, env: dict | None = None, stdin: str = "", cwd: Path | None = None) -> subprocess.CompletedProcess:
         full_env = os.environ.copy()
-        full_env["PATH"] = f"{harness['bindir']}:{full_env['PATH']}"
+        full_env["PATH"] = f"{harness['bindir']}{os.pathsep}{full_env['PATH']}"
         full_env["BATTERY_STATE"] = str(state)
         full_env.pop("FC_MODE", None)
         full_env.pop("FX_MODE", None)
         full_env.update(env or {})
         return subprocess.run(
             [sys.executable, "-m", "duet", "--config", str(harness["config"]), *args],
-            input=stdin or None,
+            # never the test runner's own stdin (a console on Windows CI): no TTY unless given input
+            **({"input": stdin} if stdin else {"stdin": subprocess.DEVNULL}),
             text=True,
             capture_output=True,
             timeout=120,
@@ -154,8 +180,14 @@ class TestCoreLoop:
     def test_hung_agent_killed_at_timeout_no_zombies(self, duet):
         proc = duet("run", "t", env={"FC_MODE": "hang"})
         assert "timed out after 5s" in proc.stdout + proc.stderr
-        ps = subprocess.run(["pgrep", "-f", "bin/fc"], capture_output=True)
-        assert ps.returncode != 0, "fake agent left running after timeout kill"
+        if os.name == "nt":
+            import psutil
+
+            left = [p for p in psutil.process_iter(["cmdline"]) if any("fc.py" in part for part in (p.info["cmdline"] or []))]
+            assert not left, f"fake agent left running after timeout kill: {left}"
+        else:
+            ps = subprocess.run(["pgrep", "-f", "bin/fc"], capture_output=True)
+            assert ps.returncode != 0, "fake agent left running after timeout kill"
 
     def test_agent_failure_halts_as_agent_error(self, duet):
         proc = duet("run", "t", env={"FC_MODE": "fail"})
@@ -412,14 +444,16 @@ class TestD01Cli:
         repo = live_repo(tmp_path)
         proc = subprocess.Popen(
             [sys.executable, "-m", "duet", "--config", str(duet.harness_config), "run", "--repo", str(repo), "t"],
-            env={**os.environ, "PATH": f"{duet.harness_bindir}:{os.environ['PATH']}", "BATTERY_STATE": str(duet.state), "FC_MODE": "hang"},
+            env={**os.environ, "PATH": f"{duet.harness_bindir}{os.pathsep}{os.environ['PATH']}", "BATTERY_STATE": str(duet.state), "FC_MODE": "hang"},
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            # Windows: its own console process group, so it can receive Ctrl+Break alone.
+            creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
         deadline = time.monotonic() + 20
         while not (duet.state / "fc-n").exists() and time.monotonic() < deadline:
             time.sleep(0.05)  # wait until the fake agent's turn is in flight
         time.sleep(0.3)
-        proc.send_signal(signal.SIGINT)
+        proc.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
         out, err = proc.communicate(timeout=30)
         assert proc.returncode == 130, out + err
         assert "Outcome: interrupted" in out

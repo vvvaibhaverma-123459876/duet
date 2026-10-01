@@ -9,7 +9,6 @@ skipped, never fatal on their own."""
 from __future__ import annotations
 
 import json
-import os
 import queue
 import subprocess
 import threading
@@ -17,7 +16,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from .process import BoundedBuffer, _pump, terminate_tree
+from .. import oscompat
+from .process import BoundedBuffer, _mark_launch, _pump, terminate_tree
 
 MAX_LINE_BYTES = 8 * 1024 * 1024
 
@@ -46,15 +46,16 @@ class JsonRpcProcess:
         max_line_bytes: int = MAX_LINE_BYTES,
     ) -> None:
         self.proc = subprocess.Popen(
-            argv,
+            oscompat.resolve_argv(argv),
             cwd=cwd,
             env=env,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
-            start_new_session=(os.name != "nt"),
+            **oscompat.own_group_kwargs(),
         )
+        _mark_launch(self.proc)
         self.on_notification = on_notification
         self.on_server_request = on_server_request
         self.max_line_bytes = max_line_bytes

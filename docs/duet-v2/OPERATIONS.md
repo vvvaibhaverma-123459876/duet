@@ -3,13 +3,15 @@
 ## Where state lives
 
 `$DUET_STATE_DIR`, otherwise `$XDG_STATE_HOME/duet`, otherwise
-`~/.local/state/duet` (macOS: `~/Library/Application Support/duet`). It is
-private (0700), and every missing parent is created private too.
+`~/.local/state/duet` (macOS: `~/Library/Application Support/duet`;
+Windows: `%LOCALAPPDATA%\duet`). It is private (0700), and every missing
+parent is created private too. On Windows the directory relies on the
+per-user ACL that `%LOCALAPPDATA%` inherits; DUET does not verify it.
 
 - `v2/runtime.db`: the event-sourced store. `duet` verifies replay in its tests; every row is derived from events.
 - `v2/artifacts/`: snapshot blobs, check output, diffs, patches, checkpoints and reports.
 - `v2/worktrees/<run>/`: the run's workspace and any isolated task worktrees.
-- `v2/service.sock`, `service.info`, `service.secret` (0600): the local service.
+- `v2/service.sock`, `service.info`, `service.secret` (0600): the local service. On Windows `service.sock` is replaced by `service.endpoint` (the loopback port) and `service.access` (the per-start access key every request must carry).
 - `v2/sessions/`: native MCP proxy sessions, keyed by the client process.
 - `integrations.json`: what `duet integrations install` owns.
 

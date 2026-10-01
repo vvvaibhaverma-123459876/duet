@@ -6,6 +6,10 @@ to it over a Unix-domain socket:
 
 - the socket lives in a 0700 directory and is created 0600; on Linux the
   connecting process must also belong to the same uid (SO_PEERCRED);
+- on Windows (no Unix sockets) it listens on 127.0.0.1 at an ephemeral port
+  written to a private endpoint file, and every request must carry the
+  per-start access key from a private file in the user's profile: loopback
+  is reachable by other local users, the key is not;
 - one JSON request per connection, newline-terminated, at most 1 MiB;
 - a participant authenticates with its bearer token, the CLI with the
   per-start service secret (a 0600 file); unauthenticated connections may
@@ -19,8 +23,6 @@ from other users and from accidents, not a security boundary against an
 unrestricted process of the same user (containment is labelled cooperative)."""
 from __future__ import annotations
 
-import errno
-import fcntl
 import hashlib
 import json
 import logging
@@ -58,6 +60,7 @@ from .contracts import (
     Unauthorized,
     ValidationError,
 )
+from .. import oscompat
 from .identity import ProcessIdentity
 from .pairing import MAX_WAIT_SECONDS, PairCoordinator
 from .paths import ensure_private_dir, runtime_dir
@@ -103,21 +106,22 @@ class ServicePaths:
     info: Path
     secret: Path
     log: Path
-    socket: Path
+    socket: Path  # the Unix socket, or on Windows the endpoint file (host and port)
+    access: Path  # per-start access key; required on every request on Windows
 
     @classmethod
     def for_root(cls, root: Path | None = None) -> "ServicePaths":
         root = ensure_private_dir(Path(root) if root else runtime_dir())
-        sock = root / "service.sock"
-        if len(os.fsencode(str(sock))) > UNIX_PATH_LIMIT:
+        sock = root / ("service.endpoint" if oscompat.IS_WINDOWS else "service.sock")
+        if not oscompat.IS_WINDOWS and len(os.fsencode(str(sock))) > UNIX_PATH_LIMIT:
             # Deep state dirs exceed sun_path; use a short private directory
             # keyed by the state dir instead.
-            short = ensure_private_dir(_socket_base() / f"duet-{os.getuid() if hasattr(os, 'getuid') else 'u'}")
+            short = ensure_private_dir(_socket_base() / f"duet-{oscompat.user_key()}")
             sock = short / (hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:20] + ".sock")
         return cls(
             root=root, db=root / "duet.db", artifacts=root / "artifacts", pairs=root / "pairs", lock=root / "service.lock",
             spawn_lock=root / "service.spawn.lock", info=root / "service.json", secret=root / "service.secret",
-            log=root / "service.log", socket=sock,
+            log=root / "service.log", socket=sock, access=root / "service.access",
         )
 
 
@@ -168,16 +172,12 @@ class ServiceClient:
             auth["token"] = self.token
         if self.secret:
             auth["secret"] = self.secret
+        if oscompat.IS_WINDOWS:
+            auth["access"] = _read_private(self.paths.access)
         payload = (json.dumps({"op": op, "args": args, "auth": auth}) + "\n").encode("utf-8")
         if len(payload) > MAX_REQUEST_BYTES:
             raise ValidationError(f"request exceeds {MAX_REQUEST_BYTES} bytes")
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(rpc_timeout)
-        try:
-            sock.connect(str(self.paths.socket))
-        except OSError as exc:
-            sock.close()
-            raise ServiceUnavailable(f"cannot reach the DUET service at {self.paths.socket}: {exc.strerror or exc}") from None
+        sock = _connect(self.paths, rpc_timeout)
         try:
             sock.sendall(payload)
             data = _read_line(sock, MAX_RESPONSE_BYTES)
@@ -196,6 +196,35 @@ class ServiceClient:
 
     def ping(self, timeout: float = 5.0) -> dict:
         return self.call("ping", rpc_timeout=timeout)
+
+
+def _read_private(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def _connect(paths: ServicePaths, timeout: float) -> socket.socket:
+    """A connected socket to the service: the Unix socket, or on Windows the
+    loopback port named in the endpoint file."""
+    try:
+        if oscompat.IS_WINDOWS:
+            endpoint = json.loads(paths.socket.read_text(encoding="utf-8"))
+            sock = socket.create_connection(("127.0.0.1", int(endpoint["port"])), timeout=timeout)
+        else:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            try:
+                sock.connect(str(paths.socket))
+            except OSError:
+                sock.close()
+                raise
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        reason = getattr(exc, "strerror", None) or exc
+        raise ServiceUnavailable(f"cannot reach the DUET service at {paths.socket}: {reason}") from None
+    sock.settimeout(timeout)
+    return sock
 
 
 def _read_line(sock: socket.socket, limit: int) -> bytes:
@@ -233,16 +262,16 @@ def ensure_service(paths: ServicePaths, *, spawn: bool = True, timeout: float = 
     if not spawn:
         raise ServiceUnavailable("the DUET service is not running and this process may not start one")
     with open(paths.spawn_lock, "a+") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        oscompat.lock_file(lock)
         if service_running(paths):
             return
         env = dict(os.environ, DUET_STATE_DIR=str(paths.root.parent) if paths.root.name == "v2" else str(paths.root))
         env.update(extra_env or {})
         fd = os.open(paths.log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            subprocess.Popen(
+            oscompat.spawn_detached(
                 [sys.executable, "-m", "duet", "service", "run", "--state-root", str(paths.root)],
-                stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, env=env, start_new_session=True, close_fds=True,
+                stdin=subprocess.DEVNULL, stdout=fd, stderr=fd, env=env,
             )
         finally:
             os.close(fd)
@@ -281,11 +310,12 @@ class RuntimeService:
         self.paths = paths
         self._lock_file = open(paths.lock, "a+")
         try:
-            fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
+            oscompat.lock_file(self._lock_file, blocking=False)
+        except oscompat.LockBusy:
             self._lock_file.close()
-            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
-                raise ServiceRunning(f"a DUET service already runs for {paths.root}") from None
+            raise ServiceRunning(f"a DUET service already runs for {paths.root}") from None
+        except OSError:
+            self._lock_file.close()
             raise
         self.identity = ProcessIdentity.current()
         self.store = Store(paths.db)
@@ -299,10 +329,11 @@ class RuntimeService:
             peer_launcher=self._launch_peer if peer_factory else None, peer_stopper=self.stop_peers, check_env=check_env,
         )
         self.secret = secrets.token_urlsafe(32)
+        self.access_key = secrets.token_urlsafe(32)
         self.idle_exit_seconds = idle_exit_seconds
         self.verify_host = verify_host
         self._stop = threading.Event()
-        self._server: socketserver.ThreadingUnixStreamServer | None = None
+        self._server: socketserver.BaseServer | None = None
         self._threads: list[threading.Thread] = []
         self._active = 0
         self._active_lock = threading.Lock()
@@ -327,16 +358,27 @@ class RuntimeService:
             def handle(self) -> None:  # noqa: D401 - socketserver API
                 service._handle_connection(self.connection)
 
-        class Server(socketserver.ThreadingUnixStreamServer):
-            daemon_threads = True
-            allow_reuse_address = True
+        if oscompat.IS_WINDOWS:
+            class TcpServer(socketserver.ThreadingTCPServer):
+                daemon_threads = True
+                allow_reuse_address = False  # never share a port with another listener
 
-        old_umask = os.umask(0o177)
-        try:
-            self._server = Server(str(self.paths.socket), Handler)
-        finally:
-            os.umask(old_umask)
-        os.chmod(self.paths.socket, 0o600)
+            # The key first: a client that finds the endpoint can then authenticate.
+            _write_private(self.paths.access, self.access_key)
+            self._server = TcpServer(("127.0.0.1", 0), Handler)
+            port = self._server.server_address[1]
+            _write_private(self.paths.socket, json.dumps({"host": "127.0.0.1", "port": port, "pid": os.getpid()}))
+        else:
+            class Server(socketserver.ThreadingUnixStreamServer):
+                daemon_threads = True
+                allow_reuse_address = True
+
+            old_umask = os.umask(0o177)
+            try:
+                self._server = Server(str(self.paths.socket), Handler)
+            finally:
+                os.umask(old_umask)
+            os.chmod(self.paths.socket, 0o600)
         _write_private(self.paths.secret, self.secret)
         _write_private(
             self.paths.info,
@@ -371,14 +413,14 @@ class RuntimeService:
             self._server.shutdown()
             self._server.server_close()
             self._server = None
-        for path in (self.paths.socket, self.paths.info, self.paths.secret):
+        for path in (self.paths.socket, self.paths.info, self.paths.secret, self.paths.access):
             try:
                 path.unlink()
             except FileNotFoundError:
                 pass
         self.store.close()
         try:
-            fcntl.flock(self._lock_file, fcntl.LOCK_UN)
+            oscompat.unlock_file(self._lock_file)
         finally:
             self._lock_file.close()
 
@@ -480,6 +522,10 @@ class RuntimeService:
                 request = json.loads(data) if data else None
                 if not isinstance(request, dict):
                     raise ValidationError("request must be a JSON object on one line")
+                if oscompat.IS_WINDOWS:
+                    auth = request.get("auth") if isinstance(request.get("auth"), dict) else {}
+                    if not secrets.compare_digest(str(auth.get("access") or ""), self.access_key):
+                        raise Unauthorized("missing or wrong access key for this DUET service")
                 conn.settimeout(MAX_WAIT_SECONDS + 30)
                 result = self.dispatch(request, peer_pid=peer_pid)
                 response = {"ok": True, "result": result}
@@ -625,14 +671,7 @@ def _peer_pid(conn: socket.socket) -> int | None:
 
 
 def _parent_pid(pid: int) -> int | None:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return None
-    try:
-        return int(stat.rsplit(")", 1)[1].split()[1])
-    except (IndexError, ValueError):
-        return None
+    return oscompat.parent_pid(pid)
 
 
 def _verify_host(host: str, peer_pid: int | None) -> None:

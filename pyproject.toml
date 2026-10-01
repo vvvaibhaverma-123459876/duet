@@ -9,7 +9,9 @@ version = "0.1.0"
 description = "Make Claude and Codex collaborate in your terminal, with the orchestrator deciding when they're actually done."
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = []
+# psutil gives the Windows process calls DUET needs (docs/duet-v2/WINDOWS_PORT.md);
+# POSIX uses /proc, ps and signals and needs nothing.
+dependencies = ["psutil>=5.9; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 test = ["pytest>=7.0"]

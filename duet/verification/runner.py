@@ -13,7 +13,6 @@ from ..runtime.hygiene import redact
 import hashlib
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -22,11 +21,19 @@ from pathlib import Path
 from ..providers.process import run_bounded
 from ..runtime.artifacts import ArtifactStore
 from ..runtime.contracts import content_hash, utc_now
+from .. import oscompat
 from ..runtime.paths import ensure_private_dir
 from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
 from .acceptance import CheckSpec
 
-BASE_ENV_ALLOW = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM", "SYSTEMROOT", "COMSPEC")
+BASE_ENV_ALLOW = (
+    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM", "SYSTEMROOT", "COMSPEC",
+    # Windows: what programs need to start, find their launchers, write
+    # temporary files and locate the user's profile. Names absent on POSIX,
+    # so POSIX environment fingerprints are unchanged.
+    "PATHEXT", "WINDIR", "SYSTEMDRIVE", "TEMP", "TMP", "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+)
 MAX_CHECK_OUTPUT = 1024 * 1024
 _NO_TESTS = (
     re.compile(r"\bno tests ran\b", re.I),
@@ -148,7 +155,7 @@ def run_check_on_snapshot(
             return _outcome(spec, "unknown", None, "", "", expected_tree_hash, before.tree_hash, "the materialised copy does not reproduce the snapshot (e.g. submodules); check not run", "", "")
         return run_check(spec, root, snapshot_before=before, parent_env=parent_env)
     finally:
-        shutil.rmtree(scratch, ignore_errors=True)
+        oscompat.remove_tree(scratch)
 
 
 def _no_tests(returncode: int | None, output: str) -> bool:

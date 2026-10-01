@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import os
 import shutil
 import signal
@@ -11,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .logging_setup import get_logger
+from . import oscompat
 
 log = get_logger()
 
@@ -127,15 +127,7 @@ def assert_safe_live_repo(path: Path) -> None:
 
 
 def _pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True  # exists but owned by another user
-    return True
+    return oscompat.pid_exists(pid)
 
 
 def _read_lock_pid(lock: Path) -> int | None:

@@ -17,6 +17,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import oscompat
+
 CHUNK = 65536
 DEFAULT_MAX_STDOUT = 8 * 1024 * 1024
 DEFAULT_MAX_STDERR = 1024 * 1024
@@ -154,15 +156,16 @@ def run_bounded(
     the call."""
     started = time.monotonic()
     proc = subprocess.Popen(
-        cmd,
+        oscompat.resolve_argv(cmd),
         cwd=cwd,
         env=env,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
-        start_new_session=(os.name != "nt"),
+        **oscompat.own_group_kwargs(),
     )
+    _mark_launch(proc)
     out_buf = BoundedBuffer(max_stdout)
     err_buf = BoundedBuffer(max_stderr)
     readers = [
@@ -200,7 +203,7 @@ def run_bounded(
     # and must not outlive the call: a descendant holding our pipes, and also
     # one that redirected its stdio away (`cmd >/dev/null 2>&1 &`), which no
     # pipe would ever reveal.
-    _clear_group(proc.pid)
+    _clear_group(proc.pid, since=getattr(proc, "_duet_launched_at", None))
     if any(reader.is_alive() for reader in readers):
         _join(readers, 1.0)
     incomplete = any(reader.is_alive() for reader in readers)
@@ -225,10 +228,13 @@ def terminate_tree(proc: subprocess.Popen, grace: float = TERM_GRACE_SECONDS) ->
     remains. The group is signalled even if the leader already exited, because
     grandchildren can outlive it. The child was started in its own session, so
     its group id is its pid and no unrelated process is addressed."""
-    if os.name == "nt":  # pragma: no cover - exercised on Windows only
+    if oscompat.IS_WINDOWS:  # pragma: no cover - exercised on Windows only
+        # No SIGTERM on Windows: kill the child's whole tree, including
+        # descendants of an already-exited leader (never re-parented there).
+        oscompat.kill_tree(proc.pid, since=getattr(proc, "_duet_launched_at", None), timeout=grace)
         try:
-            proc.kill()
-        except OSError:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
             pass
         return
     _kill_group(proc.pid, signal.SIGTERM)
@@ -243,13 +249,15 @@ def terminate_tree(proc: subprocess.Popen, grace: float = TERM_GRACE_SECONDS) ->
         pass
 
 
-def _clear_group(pgid: int, within: float = 0.5) -> None:
+def _clear_group(pgid: int, within: float = 0.5, since: float | None = None) -> None:
     """SIGKILL what is left of an exited leader's process group, and keep
     re-sending (bounded by `within`) while members remain, so one that was
     not yet scheduled, or mid-fork, when the first signal went out cannot
     survive. Call only after the leader was reaped: members awaiting their
     reaper (zombies) still count, and the loop then just runs out."""
-    if os.name == "nt":  # pragma: no cover
+    if oscompat.IS_WINDOWS:  # pragma: no cover
+        # The leader was reaped: kill what it left behind.
+        oscompat.kill_tree(pgid, since=None if since is None else since, timeout=within)
         return
     deadline = time.monotonic() + within
     while True:
@@ -263,11 +271,20 @@ def _clear_group(pgid: int, within: float = 0.5) -> None:
 
 
 def _kill_group(pgid: int, sig: int) -> None:
-    if os.name == "nt":  # pragma: no cover
-        return
+    oscompat.signal_group(pgid, sig)
+
+
+def _strip_cr(line: bytearray) -> bytes:
+    """A line without its Windows line ending's carriage return."""
+    return bytes(line[:-1]) if line.endswith(b"\r") else bytes(line)
+
+
+def _mark_launch(proc: subprocess.Popen) -> None:
+    """Remember when the child started, so a Windows tree kill never takes a
+    process older than the child (a reused pid) for one of its descendants."""
     try:
-        os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
+        proc._duet_launched_at = time.time() - 1.0  # type: ignore[attr-defined]
+    except AttributeError:  # pragma: no cover
         pass
 
 
@@ -359,15 +376,16 @@ def stream_process(
 
     started = time.monotonic()
     proc = subprocess.Popen(
-        cmd,
+        oscompat.resolve_argv(cmd),
         cwd=cwd,
         env=env,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         bufsize=0,
-        start_new_session=(os.name != "nt"),
+        **oscompat.own_group_kwargs(),
     )
+    _mark_launch(proc)
     lines: "queue.Queue[tuple[bytes, bool] | None]" = queue.Queue(maxsize=1024)
     counters = {"bytes": 0, "truncated": 0}
     err_buf = BoundedBuffer(max_stderr)
@@ -394,7 +412,7 @@ def stream_process(
                             pending += piece
                     if newline < 0:
                         break
-                    lines.put((bytes(pending), overflowing))
+                    lines.put((_strip_cr(pending), overflowing))
                     if overflowing:
                         counters["truncated"] += 1
                     pending = bytearray()
@@ -404,7 +422,7 @@ def stream_process(
             pass
         finally:
             if pending:
-                lines.put((bytes(pending), overflowing))
+                lines.put((_strip_cr(pending), overflowing))
                 if overflowing:
                     counters["truncated"] += 1
             lines.put(None)
@@ -488,7 +506,7 @@ def stream_process(
     if proc.poll() is None:  # pragma: no cover - defensive
         terminate_tree(proc, grace=term_grace)
     # Anything still in the group after the leader exited is ours.
-    _clear_group(proc.pid)
+    _clear_group(proc.pid, since=getattr(proc, "_duet_launched_at", None))
     err_reader.join(timeout=1.0)
     return StreamResult(
         returncode=proc.returncode,

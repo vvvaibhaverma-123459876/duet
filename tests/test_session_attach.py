@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from exeshim import fake_agent
 
 from duet.adapters import CLIAgent
 from duet.cli import _apply_attach
@@ -48,11 +49,8 @@ class TestBuildCommand:
 
 class TestSessionChaining:
     def _fake_claude(self, tmp_path: Path, session_id: str) -> Path:
-        script = tmp_path / "fake_claude"
         payload = json.dumps({"result": "done", "session_id": session_id})
-        script.write_text(f"#!/bin/sh\ncat > /dev/null\necho '{payload}'\n")
-        script.chmod(0o755)
-        return script
+        return fake_agent(tmp_path, "fake_claude", stdout=payload)
 
     def test_chain_adopts_returned_session_id(self, tmp_path):
         script = self._fake_claude(tmp_path, "next-session")

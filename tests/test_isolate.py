@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from exeshim import make_exe
 
 from duet.workspace import WorkspaceError, prepare_live_repo, release_lock, remove_worktree
 
@@ -229,23 +230,36 @@ class TestBaseAndBranch:
 
 # --- T5: commit attribution, driven through the real CLI --------------------
 
-FAKE_CLAUDE = r"""#!/bin/bash
-prompt=$(cat)
-[[ "$prompt" == *CLAUDE_DOCTOR_OK* ]] && { echo '{"result":"CLAUDE_DOCTOR_OK","session_id":"doc"}'; exit 0; }
-n_file="$ISO_STATE/n"; n=$(cat "$n_file" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$n_file"
-echo "agent line $n" >> agent_file.txt
-if [[ "${AGENT_COMMITS:-0}" == "1" ]]; then
-  git add -A >/dev/null 2>&1
-  git commit -qm "feat: precise message $n" >/dev/null 2>&1
-fi
-env | grep '^GIT_AUTHOR_NAME=' >> "$ISO_STATE/env.log" || true
-python3 -c "import json,sys;print(json.dumps({'result':sys.argv[1],'session_id':f'c-$n'}))" "worked [[DONE]]"
+FAKE_CLAUDE = r"""
+import json, os, subprocess, sys
+prompt = sys.stdin.read()
+if "CLAUDE_DOCTOR_OK" in prompt:
+    print(json.dumps({"result": "CLAUDE_DOCTOR_OK", "session_id": "doc"})); sys.exit(0)
+state = os.environ["ISO_STATE"]
+n_file = os.path.join(state, "n")
+try:
+    n = int(open(n_file).read().strip() or 0)
+except OSError:
+    n = 0
+n += 1
+open(n_file, "w").write(f"{n}\n")
+with open("agent_file.txt", "a") as f:
+    f.write(f"agent line {n}\n")
+if os.environ.get("AGENT_COMMITS") == "1":
+    subprocess.run(["git", "add", "-A"], capture_output=True)
+    subprocess.run(["git", "commit", "-qm", f"feat: precise message {n}"], capture_output=True)
+if "GIT_AUTHOR_NAME" in os.environ:
+    with open(os.path.join(state, "env.log"), "a") as log:
+        log.write(f"GIT_AUTHOR_NAME={os.environ['GIT_AUTHOR_NAME']}\n")
+print(json.dumps({"result": "worked [[DONE]]", "session_id": f"c-{n}"}))
 """
 
-FAKE_CODEX = r"""#!/bin/bash
-prompt=$(cat)
-[[ "$prompt" == *CODEX_DOCTOR_OK* ]] && { echo "CODEX_DOCTOR_OK"; exit 0; }
-echo "reviewed, ok [[DONE]]"
+FAKE_CODEX = r"""
+import sys
+prompt = sys.stdin.read()
+if "CODEX_DOCTOR_OK" in prompt:
+    print("CODEX_DOCTOR_OK"); sys.exit(0)
+print("reviewed, ok [[DONE]]")
 """
 
 CONFIG = """\
@@ -257,17 +271,17 @@ loop_threshold = 0.9
 
 [agents.claude]
 display_name = "Claude"
-command = ["{fc}"]
+command = ['{fc}']
 prompt_via = "stdin"
 output_format = "json"
 result_json_path = "result"
 session_json_path = "session_id"
-resume_command = ["{fc}", "--resume", "{{session_id}}"]
+resume_command = ['{fc}', "--resume", "{{session_id}}"]
 timeout_seconds = 10
 
 [agents.codex]
 display_name = "Codex"
-command = ["{fx}"]
+command = ['{fx}']
 prompt_via = "stdin"
 output_format = "text"
 timeout_seconds = 10
@@ -279,13 +293,10 @@ def harness(tmp_path_factory):
     root = tmp_path_factory.mktemp("isolate")
     bindir = root / "bin"
     bindir.mkdir()
-    fc, fx = bindir / "fc", bindir / "fx"
-    fc.write_text(FAKE_CLAUDE)
-    fx.write_text(FAKE_CODEX)
-    (bindir / "claude").symlink_to(fc)
-    (bindir / "codex").symlink_to(fx)
-    for script in (fc, fx):
-        script.chmod(0o755)
+    fc = make_exe(bindir, "fc", source=FAKE_CLAUDE)
+    fx = make_exe(bindir, "fx", source=FAKE_CODEX)
+    make_exe(bindir, "claude", source=FAKE_CLAUDE)
+    make_exe(bindir, "codex", source=FAKE_CODEX)
     config = root / "duet.toml"
     config.write_text(CONFIG.format(fc=fc, fx=fx))
     return {"bindir": bindir, "config": config}
@@ -300,7 +311,7 @@ def duet(harness, tmp_path):
         *args: str, env: dict | None = None, stdin: str = "", config: Path | None = None
     ) -> subprocess.CompletedProcess:
         full_env = os.environ.copy()
-        full_env["PATH"] = f"{harness['bindir']}:{full_env['PATH']}"
+        full_env["PATH"] = f"{harness['bindir']}{os.pathsep}{full_env['PATH']}"
         full_env["ISO_STATE"] = str(state)
         full_env.pop("AGENT_COMMITS", None)
         full_env.pop("DUET_ISOLATE", None)
@@ -308,7 +319,7 @@ def duet(harness, tmp_path):
         full_env.update(env or {})
         return subprocess.run(
             [sys.executable, "-m", "duet", "--config", str(config or harness["config"]), *args],
-            input=stdin or None,
+            **({"input": stdin} if stdin else {"stdin": subprocess.DEVNULL}),
             text=True,
             capture_output=True,
             timeout=120,

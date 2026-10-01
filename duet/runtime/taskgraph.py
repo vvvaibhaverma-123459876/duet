@@ -658,7 +658,7 @@ class TaskGraph:
         return hashlib.sha256(_normalise_output(output).encode("utf-8")).hexdigest()[:16]
 
 
-_SCRATCH_TREE = re.compile(r"""[^\s"'()]*/check-[^/\s"']+/tree(?=[/\s"')]|$)""")
+_SCRATCH_TREE = re.compile(r"""[^\s"'()]*[\\/]check-[^\\/\s"']+[\\/]tree(?=[\\/\s"')]|$)""")
 _DURATION = re.compile(r"\b\d+(?:\.\d+)?\s?(?:ms|s|sec|secs|seconds)\b")
 _ADDRESS = re.compile(r"\b0x[0-9a-fA-F]{6,}\b")
 

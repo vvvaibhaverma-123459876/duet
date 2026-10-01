@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import os
-import socket
 import stat
 import subprocess
 import sys
@@ -15,9 +14,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from duet.oscompat import IS_WINDOWS
 from pairkit import MUL, PY, dead_host, live_host, make_repo
 
-from duet.adapters import AuthError
+from duet.adapters import AgentError, AuthError
 from duet.providers.base import SettingsRecord, TurnResult, UsageObservation
 from duet.runtime.contracts import CONTROLLER, PolicyDenied, Unauthorized, ValidationError
 from duet.runtime.peers import FALLBACK_PREFIX, ManagedPeer
@@ -52,9 +53,10 @@ class TestEndpoint:
     def test_socket_is_private_and_single_instance(self, paths):
         service = start(paths)
         try:
-            assert stat.S_IMODE(os.stat(paths.socket).st_mode) == 0o600
-            assert stat.S_IMODE(os.stat(paths.root).st_mode) == 0o700
-            assert stat.S_IMODE(os.stat(paths.secret).st_mode) == 0o600
+            if not IS_WINDOWS:  # Windows: the profile directory's ACL, see the access-key test
+                assert stat.S_IMODE(os.stat(paths.socket).st_mode) == 0o600
+                assert stat.S_IMODE(os.stat(paths.root).st_mode) == 0o700
+                assert stat.S_IMODE(os.stat(paths.secret).st_mode) == 0o600
             assert ServiceClient(paths).ping()["pid"] == os.getpid()
             with pytest.raises(ServiceRunning):
                 RuntimeService(paths)
@@ -62,6 +64,27 @@ class TestEndpoint:
             service.close()
         assert not paths.socket.exists() and not paths.secret.exists()
 
+    @pytest.mark.skipif(not IS_WINDOWS, reason="Windows uses a loopback endpoint and an access key")
+    def test_windows_requests_need_the_access_key(self, paths):
+        """Loopback TCP is reachable by other local users: without the per-start
+        key from the private state directory, nothing is served, not even ping."""
+        from duet.runtime.service import _connect
+
+        service = start(paths)
+        try:
+            endpoint = json.loads(paths.socket.read_text())
+            assert endpoint["host"] == "127.0.0.1" and paths.access.exists()
+            for auth in ({}, {"access": "wrong"}):
+                with _connect(paths, 5) as sock:
+                    sock.sendall((json.dumps({"op": "ping", "args": {}, "auth": auth}) + "\n").encode())
+                    reply = json.loads(sock.makefile().readline())
+                assert reply["ok"] is False and reply["error"]["code"] == "unauthorized"
+            assert ServiceClient(paths).ping()["pid"] == os.getpid()  # the client sends the key
+        finally:
+            service.close()
+        assert not paths.access.exists() and not paths.socket.exists()
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="Unix socket path length (sun_path); Windows uses a loopback endpoint")
     def test_long_state_paths_get_a_short_socket(self, tmp_path):
         deep = tmp_path.joinpath(*["nested-directory-name"] * 6) / "state"
         long_paths = ServicePaths.for_root(deep)
@@ -72,6 +95,7 @@ class TestEndpoint:
         finally:
             service.close()
 
+    @pytest.mark.skipif(IS_WINDOWS, reason="Unix socket placement; Windows uses a loopback endpoint")
     def test_the_short_socket_does_not_depend_on_tmpdir(self, tmp_path, monkeypatch):
         """macOS CI: proxies started by an MCP client have no TMPDIR, so a
         socket placed under tempfile.gettempdir() was looked for in two places."""
@@ -107,15 +131,15 @@ class TestEndpoint:
             service.close()
 
     def test_malformed_and_oversized_requests(self, paths):
+        from duet.runtime.service import _connect
+
         service = start(paths)
         try:
-            with socket.socket(socket.AF_UNIX) as sock:
-                sock.connect(str(paths.socket))
+            with _connect(paths, 5) as sock:
                 sock.sendall(b"not json\n")
                 reply = json.loads(sock.makefile().readline())
             assert reply["ok"] is False and reply["error"]["code"] == "validation"
-            with socket.socket(socket.AF_UNIX) as sock:
-                sock.connect(str(paths.socket))
+            with _connect(paths, 5) as sock:
                 try:
                     sock.sendall(b"x" * (2 * 1024 * 1024))
                 except OSError:
@@ -299,7 +323,8 @@ class TestManagedPeer:
                 if answer:
                     break
             assert answer and not answer["body"].startswith(FALLBACK_PREFIX)
-            assert [e[0] for e in log[:2]] == ["asked", "answered"]
+            # the fake records "answered" after its send returns, which can be after we see the message
+            assert wait_until(lambda: [e[0] for e in log[:2]] == ["asked", "answered"], 10), log
             assert len(adapter.requests) == 2 and adapter.requests[1].session_id == "sess-1"  # same managed session resumed
 
             claimed = me.call("claim")
@@ -311,7 +336,8 @@ class TestManagedPeer:
             actions = service.store.read().query("SELECT type, state, participant_id FROM actions WHERE run_id = ? ORDER BY created_at", (joined["run_id"],))
             turns = [a for a in actions if a["type"] == "provider_turn"]
             assert len(turns) == 3 and all(a["state"] == "SUCCEEDED" for a in turns)
-            assert wait_until(lambda: not peer.alive, 10) and adapter.closed  # peers stop with the run
+            # peers stop with the run: stop() ends the thread, then closes the adapter
+            assert wait_until(lambda: not peer.alive and adapter.closed, 10)
             assert not peer.token_file.exists()
         finally:
             service.close()
@@ -419,6 +445,42 @@ class TestManagedPeer:
             assert wait_until(lambda: not peer.alive, 10) and len(adapter.requests) == 1  # no retry, no other account
             notes = [m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"]
             assert any("does not switch accounts" in n for n in notes)
+        finally:
+            service.close()
+
+    def test_repeated_turn_failures_stop_the_peer_instead_of_hanging(self, paths, tmp_path):
+        """Windows CI: the writer's first turn failed (a launcher problem) and
+        the pair waited forever, since no message would ever come. A failing
+        turn is retried once, then the peer stops and says why."""
+
+        class Crashing(ScriptedProvider):
+            def run_turn(self, request, *, on_event=None, cancel=None):
+                self.requests.append(request)
+                return TurnResult(
+                    status="failed", text="", session_id=None, lineage="new",
+                    settings=SettingsRecord(requested={}, accepted={}, observed={}),
+                    error=AgentError("claude: exited with status 1 before any output", kind="crash"),
+                )
+
+        peers = {}
+
+        def factory(service, run_id, provider):
+            adapter = Crashing(service.paths, None)
+            peer = ManagedPeer(service.coordinator, run_id=run_id, provider=provider, adapter=adapter, state_root=service.paths.root)
+            peers[provider] = (peer, adapter)
+            return peer.start()
+
+        service = start(paths, peer_factory=factory)
+        try:
+            repo = make_repo(tmp_path / "repo")
+            client = ServiceClient(paths)
+            joined = client.call("join", provider="codex", objective="x", repo=str(repo), checks=[CHECK], peer="managed", writer="peer")
+            me = client.with_token(joined["token"])
+            assert wait_until(lambda: me.call("status")["collaboration"] == "PEER_UNAVAILABLE", 30)
+            peer, adapter = peers["claude"]
+            assert wait_until(lambda: not peer.alive, 10) and len(adapter.requests) == 2  # one retry, then stop
+            notes = [m["body"] for m in me.call("inbox")["messages"] if m["kind"] == "STATUS"]
+            assert any("2 turns in a row failed" in n and "exited with status 1" in n for n in notes)
         finally:
             service.close()
 
