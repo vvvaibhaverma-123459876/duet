@@ -33,13 +33,13 @@ from typing import Any, Callable
 
 from .. import oscompat
 from ..verification.acceptance import AcceptanceContract, CheckSpec, Criterion
-from ..verification.completion import COMPLETED_VERIFIED, CompletionGate
+from ..verification.completion import COMPLETED_VERIFIED, CompletionGate, CompletionReport
 from ..verification.evidence import EvidenceService
 from ..verification.baseline import run_baseline
 from ..verification.runner import build_env, run_check_on_snapshot
 from ..workspaces.manager import StrictWorkspace, WorkspaceManager
 from ..workspaces.repo import resolve_repo
-from ..workspaces.snapshots import Snapshot, capture_snapshot, materialize
+from ..workspaces.snapshots import FileEntry, Snapshot, capture_snapshot, materialize
 from .api import Runtime
 from .artifacts import ArtifactStore
 from .contracts import (
@@ -74,6 +74,7 @@ from .contracts import (
     check_list,
     check_optional_text,
     check_text,
+    content_hash,
     new_id,
     parse_enum,
     parse_utc,
@@ -513,7 +514,7 @@ class PairCoordinator:
         if latest is not None:
             evidence = self.evidence.evidence_for(run_id, latest["snapshot_id"], run["acceptance_hash"])
             reviews = self.evidence.reviews_for(run_id, latest["snapshot_id"], run["acceptance_hash"])
-            report = self.gate.evaluate(run_id, latest["snapshot_id"])
+            report = self._reported_completion(run_id, latest)
             verification = {
                 "snapshot_id": latest["snapshot_id"],
                 "changed": json.loads(latest["changed_json"]),
@@ -1364,6 +1365,32 @@ class PairCoordinator:
         if not rows:
             rows = tx.query("SELECT * FROM snapshots WHERE run_id = ? AND author IS NOT NULL ORDER BY created_at DESC, rowid DESC LIMIT 1", (run_id,))
         return dict(rows[0]) if rows else None
+
+    def _reported_completion(self, run_id: str, row: dict, *, assume_verified: tuple[str, ...] = ()) -> CompletionReport:
+        """Evaluate the submitted inputs for status/report views, even after restart.
+
+        Reading the live files here would combine their scope with checks and
+        reviews of an older snapshot. Rebuild only the recorded file metadata;
+        the existing gate still decides whether every obligation holds.
+        """
+        snapshot = None
+        try:
+            manifest = json.loads(self.artifacts.get_bytes(row["manifest_ref"]).decode("utf-8"))
+            files = tuple(FileEntry(item["path"], item["mode"], item["sha256"], item["size"]) for item in manifest["files"])
+            if (manifest["tree_hash"] != row["tree_hash"] or manifest["base_sha"] != row["base_sha"]
+                    or content_hash([entry.key() for entry in files]) != row["tree_hash"]):
+                raise ValidationError("stored snapshot manifest does not match its record")
+            snapshot = Snapshot(row["tree_hash"], row["base_sha"], files)
+        except (DomainError, ValueError, TypeError, KeyError):
+            # Missing or corrupt evidence must not turn into a successful
+            # scope check; the gate reports the unavailable snapshot.
+            pass
+        settings = self.settings(run_id)
+        workspace = Path(settings.workspace_path)
+        if not workspace.is_dir():
+            workspace = Path(settings.repo_path)
+        return self.gate.evaluate(run_id, row["snapshot_id"], workspace=workspace, snapshot=snapshot,
+                                  assume_verified=assume_verified)
 
     def materialized(self, snapshot_id: str) -> Path:
         dest = self.state_root / "snapshots" / snapshot_id

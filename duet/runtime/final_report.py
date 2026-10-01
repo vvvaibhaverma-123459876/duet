@@ -103,7 +103,7 @@ def build(co: "PairCoordinator", run_id: str) -> dict:
     main = co._main_task_id(run_id)
     waiting = tx.require("tasks", main)["state"] == "REVIEW_REQUIRED"
     # A main task waiting only for review counts as implemented, as in the completion path.
-    completion = co.gate.evaluate(run_id, snap["snapshot_id"], assume_verified=(main,) if waiting else ())
+    completion = co._reported_completion(run_id, snap, assume_verified=(main,) if waiting else ())
     if run["lifecycle"] == "COMPLETED_VERIFIED" or run["lifecycle"] in ("CANCELLED", "FAILED") or run["lifecycle"].startswith("PAUSED_"):
         report["outcome"] = run["lifecycle"]
     else:

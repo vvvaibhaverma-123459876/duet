@@ -16,7 +16,7 @@ from exeshim import make_exe
 from duet.adapters import AgentTimeoutError, AuthError, BillingError, ModelUnavailableError, OutputLimitError, QuotaError
 from duet.providers.base import TurnRequest, UnsupportedSetting, lineage_for
 from duet.providers.claude_cli import ClaudeCLIAdapter, discover_from_help
-from duet.providers.codex_appserver import CodexAppServerAdapter
+from duet.providers.codex_appserver import CodexAppServerAdapter, codex_mcp_config
 from duet.providers.codex_exec import CodexExecAdapter
 from duet.providers.process import stream_process
 from duet.runtime.contracts import Control, ValidationError
@@ -169,9 +169,15 @@ class TestClaudeTurns:
     def test_cancel_interrupts_the_turn(self, claude, tmp_path, monkeypatch):  # AT31
         monkeypatch.setenv("FAKE_CLAUDE_MODE", "hang")
         cancel = threading.Event()
-        threading.Timer(0.5, cancel.set).start()
+
+        def cancel_after_init(event):
+            # A Windows batch launcher/help probe can take longer than a
+            # fixed timer. Cancel an initialized turn, whose id we can retain.
+            if event.get("type") == "system" and event.get("subtype") == "init":
+                cancel.set()
+
         started = time.monotonic()
-        result = claude.run_turn(req(tmp_path, timeout_seconds=60), cancel=cancel)
+        result = claude.run_turn(req(tmp_path, timeout_seconds=60), cancel=cancel, on_event=cancel_after_init)
         assert result.status == "cancelled" and time.monotonic() - started < 15
         assert result.session_id  # init was seen; lineage is known even for a cancelled turn
 
@@ -291,6 +297,46 @@ class TestCodexAppServer:
     def test_mcp_config_needs_a_stdio_server(self, codex, tmp_path):
         with pytest.raises(UnsupportedSetting):
             codex.run_turn(req(tmp_path, mcp_config={"mcpServers": {"x": {"url": "http://127.0.0.1:1"}}}))
+
+    @pytest.mark.parametrize("session_id,fork,method", [(None, False, "thread/start"), ("thr-old", False, "thread/resume"), ("thr-old", True, "thread/fork")])
+    def test_managed_coordination_tools_are_authorized_without_widening_sandbox(self, codex, tmp_path, session_id, fork, method):
+        from duet.runtime.peers import MANAGED_PEER_TOOLS, mcp_server_config
+
+        mcp = mcp_server_config(tmp_path / "state", tmp_path / "participant-token", "codex")
+        result = codex.run_turn(req(tmp_path, permission_profile="read_only", session_id=session_id, fork=fork, mcp_config=mcp))
+        assert result.ok
+        requests = [json.loads(line)["recv"] for line in (tmp_path / "codex.log").read_text().splitlines() if '"recv"' in line]
+        opened = next(message["params"] for message in requests if message.get("method") == method)
+        assert opened["approvalPolicy"] == "never" and opened["sandbox"] == "read-only"
+        assert set(opened["config"]) == {"mcp_servers"}
+        assert set(opened["config"]["mcp_servers"]) == {"duet"}
+        server = opened["config"]["mcp_servers"]["duet"]
+        assert set(server["enabled_tools"]) == set(MANAGED_PEER_TOOLS)
+        assert "duet_join" not in server["enabled_tools"]
+        assert server["tools"] == {name: {"approval_mode": "approve"} for name in MANAGED_PEER_TOOLS}
+        assert "default_tools_approval_mode" not in server
+
+    def test_explicit_mcp_tool_policy_preserved_without_trusting_other_tools(self):
+        config = {"mcpServers": {
+            "duet": {"command": "custom-server"},
+            "other": {"command": "other-server", "enabled_tools": ["read", "write"], "disabled_tools": ["write"],
+                      "tools": {"read": {"approval_mode": "prompt"}}},
+        }}
+        converted = codex_mcp_config(config)["mcp_servers"]
+        assert converted["duet"] == {"command": "custom-server", "args": []}
+        assert converted["other"]["tools"] == {"read": {"approval_mode": "prompt"}}
+        assert converted["other"]["disabled_tools"] == ["write"]
+        converted["other"]["tools"]["read"]["approval_mode"] = "approve"
+        assert config["mcpServers"]["other"]["tools"]["read"]["approval_mode"] == "prompt"
+
+    @pytest.mark.parametrize("policy", [
+        {"enabled_tools": "duet_send"}, {"disabled_tools": [False]}, {"tools": []},
+        {"tools": {"duet_send": {"approval_mode": "invalid"}}},
+        {"tools": {"duet_send": {"approval_mode": "approve", "unknown": True}}},
+    ])
+    def test_invalid_mcp_tool_policy_is_rejected(self, policy):
+        with pytest.raises(UnsupportedSetting):
+            codex_mcp_config({"mcpServers": {"duet": {"command": "python", **policy}}})
 
     def test_cancel_uses_turn_interrupt(self, tmp_path, monkeypatch):  # AT31
         monkeypatch.setenv("FAKE_CODEX_MODE", "hang")

@@ -72,6 +72,10 @@ def test_native_claude_and_native_codex_pair_over_mcp(tmp_path, state):
         async with Client(proxy(state), mode="legacy") as claude, Client(proxy(state, wrapped=True), mode="legacy") as codex:
             tools = {t.name for t in (await claude.list_tools()).tools}
             assert tools == TOOLS
+            from duet.runtime.peers import MANAGED_PEER_TOOLS
+
+            assert len(MANAGED_PEER_TOOLS) == len(set(MANAGED_PEER_TOOLS))
+            assert set(MANAGED_PEER_TOOLS) <= tools - {"duet_join"}
             assert "Answer your peer's questions and review requests first" in (claude.instructions or "")
 
             started = await call(claude, "duet_join", provider="claude", objective="add mul(a, b) to calc.py", repo=str(repo),

@@ -148,8 +148,16 @@ def run_check_on_snapshot(
             materialize(manifest, store, root)
         except Exception as exc:  # a snapshot that cannot be rebuilt cannot be verified
             return _outcome(spec, "unknown", None, "", "", expected_tree_hash, expected_tree_hash, f"snapshot could not be materialised: {exc}", "", "")
-        for argv in (["init", "-q"], ["add", "-A"], ["-c", "user.name=duet", "-c", "user.email=duet@localhost.invalid", "commit", "-q", "--no-verify", "--allow-empty", "-m", "snapshot"]):
+        for argv in (["init", "-q"], ["add", "-A"]):
             subprocess.run(["git", *argv], cwd=root, capture_output=True, check=False)
+        # On Windows chmod cannot recreate executable bits; carry the
+        # immutable manifest's modes into the verification index instead.
+        executable = [item["path"] for item in manifest["files"] if item["mode"] == "100755"]
+        if executable:
+            subprocess.run(["git", "update-index", "--chmod=+x", "-z", "--stdin"], cwd=root, capture_output=True, check=False,
+                           input=b"".join(path.encode("utf-8", errors="surrogateescape") + b"\0" for path in executable))
+        subprocess.run(["git", "-c", "user.name=duet", "-c", "user.email=duet@localhost.invalid", "commit", "-q", "--no-verify", "--allow-empty", "-m", "snapshot"],
+                       cwd=root, capture_output=True, check=False)
         before = capture_snapshot(root)
         if before.tree_hash != expected_tree_hash:
             return _outcome(spec, "unknown", None, "", "", expected_tree_hash, before.tree_hash, "the materialised copy does not reproduce the snapshot (e.g. submodules); check not run", "", "")

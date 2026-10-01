@@ -22,10 +22,10 @@ ALREADY_GREEN = [PY, "-c", "import calc; assert calc.add(1, 2) == 3"]
 
 
 class Pair:
-    def __init__(self, tmp_path, checks=(CHECK,)):
+    def __init__(self, tmp_path, checks=(CHECK,), protected=None):
         self.repo = make_repo(tmp_path / "repo")
         self.co = coordinator(tmp_path / "state")
-        started = self.co.join(None, provider="claude", objective="add mul", repo=str(self.repo), checks=list(checks), peer="invite", host=live_host())
+        started = self.co.join(None, provider="claude", objective="add mul", repo=str(self.repo), checks=list(checks), protected=protected, peer="invite", host=live_host())
         self.run_id = started["run_id"]
         self.claude = self.co.runtime.authenticate(started["token"])
         joined = self.co.join(None, provider="codex", run_id=self.run_id, invite=started["invite"]["code"], host=str(ProcessIdentity.of(os.getppid())))
@@ -156,6 +156,37 @@ def test_the_final_report_names_revisions_checks_and_missing_obligations(tmp_pat
     assert "**Outcome: COMPLETED_VERIFIED**" in text and snap in text and "none" in text.split("## Missing obligations")[1]
     assert done["policy"]["resolved"] and done["resources"]["actions"]["check"]  # AT48: policy and resources exported
     assert "## Resources" in text and "actions check:" in text
+
+
+def test_status_and_report_check_protected_inputs_from_the_recorded_snapshot(tmp_path):
+    pair = Pair(tmp_path, protected=["check_feature.py"])
+    snap = pair.submit(pair.claude, {"calc.py": MUL})
+    pair.review(pair.codex, snap)
+    assert pair.lifecycle() == "COMPLETED_VERIFIED"
+
+    # A restarted coordinator has no in-memory snapshots. Subsequent edits
+    # must not be substituted for the immutable inputs that were verified.
+    reopened = coordinator(tmp_path / "state")
+    assert reopened._snapshots == {}
+    pair.write({"check_feature.py": "raise AssertionError('later live edit')\n"})
+    completion = reopened.run_status(pair.run_id)["verification"]["completion"]
+    assert completion["outcome"] == "COMPLETED_VERIFIED" and completion["satisfied"]
+    scope = next(item for item in completion["items"] if item["name"] == "scope_and_policy")
+    assert scope["ok"]
+    report = build(reopened, pair.run_id)
+    assert report["outcome"] == "COMPLETED_VERIFIED" and report["missing"] == []
+
+
+def test_status_and_report_still_flag_a_submitted_protected_edit(tmp_path):
+    pair = Pair(tmp_path, protected=["check_feature.py"])
+    pair.submit(pair.claude, {"calc.py": MUL, "check_feature.py": "print('weakened check')\n"})
+    completion = pair.co.run_status(pair.run_id)["verification"]["completion"]
+    scope = next(item for item in completion["items"] if item["name"] == "scope_and_policy")
+    assert not scope["ok"] and "check_feature.py" in scope["detail"]
+    report = build(pair.co, pair.run_id)
+    missing = {item["item"]: item for item in report["missing"]}
+    assert "check_feature.py" in missing["scope_and_policy"]["detail"]
+    assert report["outcome"] != "COMPLETED_VERIFIED"
 
 
 def test_report_cli_help():
