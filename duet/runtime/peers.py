@@ -49,6 +49,17 @@ MAX_TURN_FAILURES = 2
 RETRY_PAUSE_SECONDS = 2.0
 FALLBACK_PREFIX = "[DUET: delivered from the end of the peer's turn because it did not reply with duet_send] "
 
+# These are the run-scoped coordination operations a managed peer needs.
+# Creating/joining runs is deliberately absent: the private token already
+# binds the MCP proxy to this participant, and the service checks its role.
+# Keep this explicit so adding an MCP tool does not silently authorize it.
+MANAGED_PEER_TOOLS = (
+    "duet_send", "duet_inbox", "duet_wait", "duet_status",
+    "duet_propose_task", "duet_propose_plan", "duet_decide_plan",
+    "duet_claim", "duet_complete_task", "duet_decide_task", "duet_handoff",
+    "duet_submit", "duet_request_review", "duet_request_profile",
+)
+
 
 ROUTING_ADVICE = {
     "diagnose_environment": ("The last failure looks environmental (a missing tool, module or permission), not a reasoning problem: "
@@ -103,6 +114,14 @@ def mcp_server_config(state_root: Path, token_file: Path, provider: str) -> dict
         # Codex times MCP tool calls out (60 s by default). The key is accepted
         # by 0.157.1; whether it takes effect was not observable here.
         server["tool_timeout_sec"] = int(MAX_WAIT_SECONDS + 30)
+        # A noninteractive Codex turn keeps approvalPolicy=never, which
+        # rejects MCP calls that would prompt. Authorize only our own local,
+        # token-bound coordination tools in this thread's server config.
+        # Shell/file approvals, other MCP servers, and native sessions retain
+        # their policies. See the Codex per-tool approval_mode reference:
+        # https://learn.chatgpt.com/docs/config-file/config-reference
+        server["enabled_tools"] = list(MANAGED_PEER_TOOLS)
+        server["tools"] = {name: {"approval_mode": "approve"} for name in MANAGED_PEER_TOOLS}
     return {"mcpServers": {"duet": server}}
 
 

@@ -21,6 +21,7 @@ import json
 import os
 import stat
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -40,6 +41,7 @@ TRANSIENT_PATTERNS = (
 )
 DEFAULT_MAX_BLOB_BYTES = 20 * 1024 * 1024
 CHUNK = 1024 * 1024
+_GIT_NONPRINTABLE = bytes((*range(0, 8), 11, *range(14, 27), *range(28, 32), 127))
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,66 @@ def _hash_file(path: Path) -> tuple[str, int]:
     return "sha256:" + digest.hexdigest(), size
 
 
+def _git_settings(root: Path) -> dict[str, str]:
+    proc = subprocess.run(["git", "config", "--null", "--get-regexp", r"^core\.(autocrlf|eol|filemode)$"], cwd=root, capture_output=True)
+    if proc.returncode not in (0, 1):
+        raise ValidationError(f"could not read Git checkout settings: {proc.stderr.decode(errors='replace').strip()}")
+    return dict(record.decode().partition("\n")[::2] for record in proc.stdout.split(b"\0") if record)
+
+
+def _true(value: str) -> bool:
+    return value.lower() in ("", "true", "yes", "on", "1")
+
+
+def _checkout_crlf(root: Path, base_sha: str, paths: list[str]) -> dict[str, str]:
+    """Paths whose base blobs Git may check out as CRLF, and text/auto policy.
+
+    Only the built-in newline conversion is recognised. Attribute lookup
+    cannot run clean/smudge filters, and uses an isolated base-commit index:
+    editing or staging tracked .gitattributes must not hide protected-file
+    edits. Existing user/system/info attributes and Git checkout settings
+    remain trusted repository configuration, as elsewhere in Duet.
+    No worktree file or real index is changed by these commands.
+    """
+    settings = _git_settings(root)
+    with tempfile.TemporaryDirectory(prefix="duet-base-index-") as directory:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(directory) / "index"))
+        env.pop("GIT_ATTR_SOURCE", None)
+        for args, data in (
+            (["-c", "core.splitIndex=false", "read-tree", base_sha], None),
+            (["check-attr", "--cached", "-z", "--stdin", "text", "crlf", "eol"],
+             b"".join(path.encode("utf-8", errors="surrogateescape") + b"\0" for path in paths)),
+        ):
+            proc = subprocess.run(["git", "-c", "core.fsmonitor=false", *args], cwd=root, env=env, input=data, capture_output=True)
+            if proc.returncode != 0:
+                raise ValidationError(f"could not read base checkout attributes: {proc.stderr.decode(errors='replace').strip()}")
+    fields = proc.stdout.split(b"\0")[:-1]
+    attrs: dict[str, dict[str, str]] = {}
+    for pos in range(0, len(fields), 3):
+        path, name, value = (item.decode("utf-8", errors="surrogateescape") for item in fields[pos:pos + 3])
+        attrs.setdefault(path, {})[name] = value
+    autocrlf = settings.get("core.autocrlf", "false").lower()
+    native_crlf = settings.get("core.eol", "native").lower() == "crlf" or (
+        settings.get("core.eol", "native").lower() == "native" and os.name == "nt"
+    )
+    default_crlf = autocrlf != "input" and (_true(autocrlf) or native_crlf)
+    policies = {}
+    for path, values in attrs.items():
+        text = values["text"]
+        if text not in ("set", "unset", "auto", "input"):
+            text = values["crlf"]
+        eol = values["eol"]
+        if text == "unset" or eol == "lf":
+            continue
+        if eol == "crlf":
+            policies[path] = "auto" if text == "auto" else "text"
+        elif text in ("set", "auto") and default_crlf:
+            policies[path] = "auto" if text == "auto" else "text"
+        elif text not in ("set", "auto", "input") and _true(autocrlf):
+            policies[path] = "auto"
+    return policies
+
+
 def capture_snapshot(
     workspace: Path | str,
     *,
@@ -141,6 +203,7 @@ def capture_snapshot(
     if untracked not in ("include", "explicit"):
         raise ValidationError("untracked must be 'include' or 'explicit'")
     index = _index_modes(root)
+    trust_filemode = os.name != "nt" or _true(_git_settings(root).get("core.filemode", "true"))
     tracked = set(index)
     deleted = set(_git_z(["ls-files", "-z", "--deleted"], root))
     candidates: dict[str, str] = {path: "tracked" for path in tracked - deleted}
@@ -194,6 +257,8 @@ def capture_snapshot(
             continue
         digest, size = _hash_file(full)
         mode = "100755" if info.st_mode & stat.S_IXUSR else "100644"
+        if not trust_filemode and index_mode in ("100644", "100755"):
+            mode = index_mode  # Windows cannot represent Git executable bits
         files.append(FileEntry(path, mode, digest, size))
         if store is not None and size <= max_blob_bytes:
             blobs[path] = store.put_file(full)
@@ -210,9 +275,19 @@ def base_file_hashes(workspace: Path, base_sha: str) -> dict[str, tuple[str, str
     """path -> (mode, sha256) of every file in `base_sha`, hashed the same way
     as snapshot entries (symlinks hash their target, like git) so the two can
     be compared. Streams all blobs through one `git cat-file --batch`."""
-    root = Path(workspace)
+    return _base_file_versions(Path(workspace), base_sha)[0]
+
+
+def _base_file_versions(root: Path, base_sha: str, *, checkout: bool = False) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
+    """Raw base hashes plus permitted CRLF checkout hashes, streamed once.
+
+    Snapshot identities always hash exact bytes. Comparison accepts the raw
+    base or its Git CRLF checkout form, never a normalised current file. This
+    also works for immutable snapshots after the live workspace has changed.
+    """
     entries = []
     result: dict[str, tuple[str, str]] = {}
+    checkout_hashes: dict[str, str] = {}
     for record in _git_z(["ls-tree", "-r", "-z", base_sha], root):
         meta, _, path = record.partition("\t")
         mode, kind, obj = meta.split()
@@ -221,7 +296,8 @@ def base_file_hashes(workspace: Path, base_sha: str) -> dict[str, tuple[str, str
         else:
             entries.append((path, mode, obj))
     if not entries:
-        return result
+        return result, checkout_hashes
+    policies = _checkout_crlf(root, base_sha, [path for path, mode, _ in entries if mode in ("100644", "100755")]) if checkout else {}
     proc = subprocess.Popen(["git", "cat-file", "--batch"], cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     assert proc.stdin is not None and proc.stdout is not None
     try:
@@ -233,26 +309,63 @@ def base_file_hashes(workspace: Path, base_sha: str) -> dict[str, tuple[str, str
                 raise ValidationError(f"unexpected object for {path} in {base_sha}: {header!r}")
             size = int(header[2])
             digest = hashlib.sha256()
+            policy = policies.get(path)
+            crlf_digest = hashlib.sha256()
+            pending_cr = b""
+            carriage = nul = nonprintable = printable = 0
+            last = b""
             remaining = size
             while remaining:
                 chunk = proc.stdout.read(min(remaining, CHUNK))
                 if not chunk:
                     raise ValidationError("git cat-file ended early")
                 digest.update(chunk)
+                if policy:
+                    if policy == "auto":
+                        # Git's automatic conversion leaves CR-containing and
+                        # binary blobs untouched (including its control-byte
+                        # heuristic, not only files containing a NUL).
+                        carriage += chunk.count(b"\r")
+                        nul += chunk.count(b"\0")
+                        bad = len(chunk) - len(chunk.translate(None, _GIT_NONPRINTABLE))
+                        nonprintable += bad
+                        printable += len(chunk) - bad - chunk.count(b"\r") - chunk.count(b"\n")
+                    data = pending_cr + chunk
+                    pending_cr = b"\r" if data.endswith(b"\r") else b""
+                    if pending_cr:
+                        data = data[:-1]
+                    crlf_digest.update(data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+                    last = chunk[-1:]
                 remaining -= len(chunk)
             proc.stdout.read(1)  # trailing newline
             result[path] = (mode, "sha256:" + digest.hexdigest())
+            if policy:
+                crlf_digest.update(pending_cr)
+                nonprintable -= last == b"\x1a"  # Git permits a trailing DOS EOF byte
+                if policy == "text" or (not carriage and not nul and nonprintable <= printable // 128):
+                    checkout_hashes[path] = "sha256:" + crlf_digest.hexdigest()
     finally:
         proc.stdin.close()
         proc.wait(timeout=30)
-    return result
+    return result, checkout_hashes
+
+
+def _modified_paths(root: Path, base_sha: str | None, files: tuple[FileEntry, ...] | list[FileEntry]) -> set[str]:
+    base, checkout = _base_file_versions(root, base_sha, checkout=True) if base_sha else ({}, {})
+    current = {f.path: (f.mode, f.sha256) for f in files}
+    changed = set()
+    for path in set(base) | set(current):
+        before, after = base.get(path), current.get(path)
+        if before == after:
+            continue
+        if before and after and before[0] == after[0] and checkout.get(path) == after[1]:
+            continue
+        changed.add(path)
+    return changed
 
 
 def _changed_paths(root: Path, base_sha: str, files: list[FileEntry]) -> list[str]:
-    base = base_file_hashes(root, base_sha)
-    current = {f.path: (f.mode, f.sha256) for f in files}
-    changed = {p for p in set(base) | set(current) if base.get(p) != current.get(p) and not is_transient(p)}
-    return sorted(changed)
+    return sorted(path for path in _modified_paths(root, base_sha, files) if not is_transient(path))
 
 
 def matches_protected(path: str, pattern: str) -> bool:
@@ -271,13 +384,8 @@ def protected_changes(snapshot: Snapshot, workspace: Path, base_sha: str | None,
     acceptance inputs they are judged by (AT24)."""
     if not patterns:
         return []
-    base = base_file_hashes(Path(workspace), base_sha) if base_sha else {}
-    current = {f.path: (f.mode, f.sha256) for f in snapshot.files}
-    hits = []
-    for path in sorted(set(base) | set(current)):
-        if any(matches_protected(path, pattern) for pattern in patterns) and base.get(path) != current.get(path):
-            hits.append(path)
-    return hits
+    return sorted(path for path in _modified_paths(Path(workspace), base_sha, snapshot.files)
+                  if any(matches_protected(path, pattern) for pattern in patterns))
 
 
 def materialize(manifest: dict, store: ArtifactStore, dest: Path, *, recreate_links: bool = True) -> Path:

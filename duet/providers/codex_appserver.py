@@ -439,7 +439,12 @@ __all__ = ["CodexAppServerAdapter"]
 
 def codex_mcp_config(mcp_config: dict) -> dict:
     """Translate the Claude-style `{"mcpServers": {name: {command, args, env}}}`
-    shape into Codex thread config. Only stdio servers are passed through."""
+    shape into Codex thread config. Only stdio servers are passed through.
+
+    Preserve explicit tool policies supplied by the caller; never infer trust
+    from a server's name. Managed DUET peers supply a bounded allowlist, while
+    arbitrary caller-provided servers keep Codex's default approval policy.
+    """
     servers = mcp_config.get("mcpServers") if isinstance(mcp_config, dict) else None
     if not isinstance(servers, dict) or not servers:
         raise UnsupportedSetting("mcp_config needs an mcpServers table with at least one stdio server")
@@ -453,5 +458,23 @@ def codex_mcp_config(mcp_config: dict) -> dict:
         for key in ("tool_timeout_sec", "startup_timeout_sec"):
             if key in spec:
                 entry[key] = spec[key]
+        for key in ("enabled_tools", "disabled_tools"):
+            if key in spec:
+                names = spec[key]
+                if not isinstance(names, list) or not all(isinstance(tool, str) and tool for tool in names):
+                    raise UnsupportedSetting(f"MCP server {name!r} {key} must be a list of tool names")
+                entry[key] = list(names)
+        if "tools" in spec:
+            policies = spec["tools"]
+            if not isinstance(policies, dict):
+                raise UnsupportedSetting(f"MCP server {name!r} tools must be a table")
+            entry["tools"] = {}
+            for tool, policy in policies.items():
+                if not isinstance(tool, str) or not tool or not isinstance(policy, dict):
+                    raise UnsupportedSetting(f"MCP server {name!r} has an invalid tool policy")
+                mode = policy.get("approval_mode")
+                if set(policy) != {"approval_mode"} or mode not in ("auto", "prompt", "writes", "approve"):
+                    raise UnsupportedSetting(f"MCP server {name!r} tool {tool!r} needs a supported approval_mode")
+                entry["tools"][tool] = {"approval_mode": mode}
         out[name] = entry
     return {"mcp_servers": out}

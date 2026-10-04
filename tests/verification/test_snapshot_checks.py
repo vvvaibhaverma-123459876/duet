@@ -8,7 +8,6 @@ import os
 import subprocess
 import sys
 import threading
-import time
 from pathlib import Path
 
 from duet.runtime.artifacts import ArtifactStore
@@ -70,17 +69,27 @@ def test_edits_while_the_check_runs_cannot_reach_it(tmp_path):
     before and after, but the check read the temporary content."""
     root = repo(tmp_path)
     spec = CheckSpec("slow", argv=(PY, "-c", "import time; time.sleep(0.8); import calc; assert calc.mul(3, 4) == 12"))
+    store = ArtifactStore(tmp_path / "artifacts")
+    snap = capture_snapshot(root, store=store)
+    edited = threading.Event()
+    checked = threading.Event()
 
     def flip():
-        time.sleep(0.3)
         (root / "calc.py").write_text(MUL)
-        time.sleep(1.2)
+        edited.set()
+        checked.wait(30)
         (root / "calc.py").write_text("def add(a, b):\n    return a + b\n")
 
     thread = threading.Thread(target=flip)
     thread.start()
-    snap, outcome = snapshot_check(tmp_path, root, spec)
-    thread.join()
+    try:
+        # The edit must follow capture and overlap verification. A timer
+        # started before capture races with Git subprocess startup on Windows.
+        assert edited.wait(10)
+        outcome = run_check_on_snapshot(spec, snap.manifest(), store, tmp_path / "scratch", expected_tree_hash=snap.tree_hash)
+    finally:
+        checked.set()
+        thread.join()
     assert outcome.status == "failed" and outcome.snapshot_before == snap.tree_hash
 
 

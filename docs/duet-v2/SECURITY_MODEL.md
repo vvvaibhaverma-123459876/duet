@@ -32,6 +32,15 @@ user, which can read DUET's store, tokens and worktrees directly.
 It is complemented by the D02 authorisation tests, the D03 snapshot and
 symlink tests, the D05 endpoint tests, and the D12 installer tests.
 
+Managed Codex sessions explicitly authorize a fixed list of DUET coordination
+tools through per-tool MCP approval settings in that thread. The local stdio
+server uses a token bound to the existing participant; it still enforces the
+participant's role and cannot create another run. `duet_join` is excluded from
+the allowlist. This does not approve shell commands, file changes, other MCP
+servers, or tools added in future versions. The role's sandbox and the default
+refusal of unrelated approval requests remain in effect. Native sessions and
+the user's global Codex configuration are not changed.
+
 ## Not protected (stated, not hidden)
 
 - **Same-user malicious code.** Any process running as the user can read
